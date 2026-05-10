@@ -14,6 +14,7 @@
 #include "../gfx/common.hpp"
 #include "../internal.hpp"
 #include "../window.hpp"
+#include "openxr_integration.hpp"
 
 #ifdef WEBGPU_DAWN
 #include "../dawn/BackendBinding.hpp"
@@ -460,6 +461,15 @@ bool initialize(AuroraBackend auroraBackend) {
   }
   g_adapter.GetInfo(&g_adapterInfo);
   g_backendType = g_adapterInfo.backendType;
+
+  if (g_backendType == wgpu::BackendType::Vulkan) {
+      if (!openxr::initialize()) {
+          Log.warn("Failed to initialize OpenXR. Continuing without VR.");
+      } else {
+          Log.info("OpenXR initialized successfully.");
+      }
+  }
+
   const auto backendName = magic_enum::enum_name(g_backendType);
   auto adapterName = g_adapterInfo.device;
   if (adapterName.IsUndefined()) {
@@ -659,6 +669,7 @@ void shutdown() {
   g_adapter = {};
   g_instance = {};
 
+  openxr::shutdown();
   cache_shutdown();
 }
 
