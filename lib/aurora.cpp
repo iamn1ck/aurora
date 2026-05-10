@@ -5,6 +5,7 @@
 #include "gx/fifo.hpp"
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
+#include "webgpu/openxr_integration.hpp"
 #include <webgpu/webgpu_cpp.h>
 #endif
 
@@ -235,6 +236,8 @@ bool begin_frame() noexcept {
     }
   }
 
+  openxr::begin_frame();
+
   imgui::new_frame(window::get_window_size());
   if (!gfx::begin_frame()) {
     g_currentView = {};
@@ -254,22 +257,49 @@ void end_frame() noexcept {
   auto encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
   gfx::end_frame(encoder);
   gfx::render(encoder);
+    const auto& presentSource = webgpu::present_source();
+    auto desktopViewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
+                                                       webgpu::g_graphicsConfig.surfaceConfiguration.height,
+                                                       presentSource.size.width, presentSource.size.height);
+    wgpu::BindGroup presentBindGroup = webgpu::g_CopyBindGroup;
+  #if AURORA_ENABLE_RMLUI
+    if (rmlui::is_initialized()) {
+      const auto rmlOutput = rmlui::render(encoder, desktopViewport);
+      if (rmlOutput.texture != nullptr) {
+        presentBindGroup = rmlOutput.copyBindGroup;
+      }
+    }
+  #endif
+
+    if (openxr::is_initialized()) {
+      wgpu::TextureView xrView = openxr::get_texture_view();
+      if (xrView) {
+        const std::array attachments{
+            wgpu::RenderPassColorAttachment{
+                .view = xrView,
+                .loadOp = wgpu::LoadOp::Clear,
+                .storeOp = wgpu::StoreOp::Store,
+            },
+        };
+        const wgpu::RenderPassDescriptor renderPassDescriptor{
+            .label = "VR EFB copy render pass",
+            .colorAttachmentCount = attachments.size(),
+            .colorAttachments = attachments.data(),
+        };
+        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
+        pass.SetPipeline(webgpu::g_CopyPipeline);
+        pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
+        pass.SetViewport(0.0f, 0.0f, static_cast<float>(openxr::get_width()), static_cast<float>(openxr::get_height()), 0.0f, 1.0f);
+        pass.Draw(3);
+        pass.End();
+        
+        openxr::copy_to_shared(encoder);
+      }
+    }
+
   {
     window::SurfaceLock surfaceLock;
     if (window::is_presentable() && g_surface && g_currentView) {
-      const auto& presentSource = webgpu::present_source();
-      auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
-                                                         webgpu::g_graphicsConfig.surfaceConfiguration.height,
-                                                         presentSource.size.width, presentSource.size.height);
-      wgpu::BindGroup presentBindGroup = webgpu::g_CopyBindGroup;
-    #if AURORA_ENABLE_RMLUI
-      if (rmlui::is_initialized()) {
-        const auto rmlOutput = rmlui::render(encoder, viewport);
-        if (rmlOutput.texture != nullptr) {
-          presentBindGroup = rmlOutput.copyBindGroup;
-        }
-      }
-    #endif
       {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
@@ -287,7 +317,7 @@ void end_frame() noexcept {
         // Copy EFB -> XFB (swapchain)
         pass.SetPipeline(webgpu::g_CopyPipeline);
         pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
-        pass.SetViewport(viewport.left, viewport.top, viewport.width, viewport.height, viewport.znear, viewport.zfar);
+        pass.SetViewport(desktopViewport.left, desktopViewport.top, desktopViewport.width, desktopViewport.height, desktopViewport.znear, desktopViewport.zfar);
 
         pass.Draw(3);
         pass.End();
@@ -330,6 +360,8 @@ void end_frame() noexcept {
     }
     g_currentView = {};
   }
+  
+  openxr::end_frame();
 
   TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
   TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);
