@@ -48,6 +48,7 @@ extern TextureWithSampler g_frameBuffer;
 extern TextureWithSampler g_frameBufferResolved;
 extern TextureWithSampler g_depthBuffer;
 extern wgpu::RenderPipeline g_CopyPipeline;
+extern wgpu::RenderPipeline g_BlendCopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
 extern wgpu::Buffer g_CopyUniformBuffer;
 extern wgpu::BindGroup g_xrEyeBindGroups[2]; // per-eye stereo blit bind groups

@@ -986,18 +986,23 @@ void WebGPURenderInterface::EnsureFrameRenderingStarted() {
   }
 
   m_frameRenderingStarted = true;
-  const wgpu::BindGroup seedBindGroup = CreateImageBindGroup(m_frameSeedView);
 
-  if (m_layers[0].multisampleView) {
-    BeginLayerPass(0, wgpu::LoadOp::Clear, "RmlUi base layer seed pass", true);
-    ApplyFullFrameScissor();
-    DrawFullscreenTexture(seedBindGroup, m_layerOpaqueBlitPipeline);
-    BeginLayerPass(0, wgpu::LoadOp::Load, "RmlUi base layer pass");
+  if (m_frameSeedView) {
+    const wgpu::BindGroup seedBindGroup = CreateImageBindGroup(m_frameSeedView);
+
+    if (m_layers[0].multisampleView) {
+      BeginLayerPass(0, wgpu::LoadOp::Clear, "RmlUi base layer seed pass", true);
+      ApplyFullFrameScissor();
+      DrawFullscreenTexture(seedBindGroup, m_layerOpaqueBlitPipeline);
+      BeginLayerPass(0, wgpu::LoadOp::Load, "RmlUi base layer pass");
+    } else {
+      BeginRenderTargetPass(m_layers[0].view, wgpu::LoadOp::Clear, "RmlUi game frame copy pass");
+      ApplyFullFrameScissor();
+      DrawFullscreenTexture(seedBindGroup, m_opaqueBlitPipeline);
+      BeginLayerPass(0, wgpu::LoadOp::Load, "RmlUi base layer pass", true);
+    }
   } else {
-    BeginRenderTargetPass(m_layers[0].view, wgpu::LoadOp::Clear, "RmlUi game frame copy pass");
-    ApplyFullFrameScissor();
-    DrawFullscreenTexture(seedBindGroup, m_opaqueBlitPipeline);
-    BeginLayerPass(0, wgpu::LoadOp::Load, "RmlUi base layer pass", true);
+    BeginLayerPass(0, wgpu::LoadOp::Clear, "RmlUi base layer pass", true);
   }
 }
 

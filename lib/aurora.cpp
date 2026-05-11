@@ -262,9 +262,13 @@ void end_frame() noexcept {
                                                        webgpu::g_graphicsConfig.surfaceConfiguration.height,
                                                        presentSource.size.width, presentSource.size.height);
     wgpu::BindGroup presentBindGroup = webgpu::g_CopyBindGroup;
+    rmlui::RenderOutput rmlOutput{};
   #if AURORA_ENABLE_RMLUI
     if (rmlui::is_initialized()) {
-      const auto rmlOutput = rmlui::render(encoder, desktopViewport);
+      // If OpenXR is initialized, we render RmlUi WITHOUT seeding from the game output,
+      // so we get a transparent UI texture for the quad layer.
+      const webgpu::TextureWithSampler* seed = openxr::is_initialized() ? nullptr : &presentSource;
+      rmlOutput = rmlui::render(encoder, desktopViewport, seed);
       if (rmlOutput.texture != nullptr) {
         presentBindGroup = rmlOutput.copyBindGroup;
       }
@@ -341,6 +345,32 @@ void end_frame() noexcept {
         xrPass.End();
 
         openxr::copy_to_shared(encoder);
+        if (rmlOutput.texture != nullptr) {
+          // Blit the RmlUi texture to the OpenXR menu shared texture.
+          // We can use a simple blit here if we have a way to copy between Dawn textures.
+          // Actually, openxr_integration.cpp provides get_menu_texture_view().
+          wgpu::TextureView menuView = openxr::get_menu_texture_view();
+          if (menuView) {
+            const std::array menuAttachments{
+                wgpu::RenderPassColorAttachment{
+                    .view = menuView,
+                    .loadOp = wgpu::LoadOp::Clear,
+                    .storeOp = wgpu::StoreOp::Store,
+                },
+            };
+            const wgpu::RenderPassDescriptor menuPassDesc{
+                .label = "OpenXR menu blit",
+                .colorAttachmentCount = menuAttachments.size(),
+                .colorAttachments = menuAttachments.data(),
+            };
+            const auto menuPass = encoder.BeginRenderPass(&menuPassDesc);
+            menuPass.SetPipeline(webgpu::g_CopyPipeline);
+            menuPass.SetBindGroup(0, rmlOutput.copyBindGroup, 0, nullptr);
+            menuPass.Draw(3);
+            menuPass.End();
+            openxr::copy_menu_to_shared(encoder);
+          }
+        }
       }
     }
 
@@ -363,9 +393,43 @@ void end_frame() noexcept {
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         // Copy EFB -> XFB (swapchain)
         pass.SetPipeline(webgpu::g_CopyPipeline);
-        pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
+        if (openxr::is_initialized()) {
+          // If OpenXR is active, presentBindGroup is just the UI, and presentSource is the game.
+          // We need to blit the game FIRST.
+          pass.SetBindGroup(0, webgpu::g_CopyBindGroup, 0, nullptr);
+        } else {
+          // Otherwise, presentBindGroup already contains both if RmlUi was seeded.
+          pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
+        }
         pass.SetViewport(desktopViewport.left, desktopViewport.top, desktopViewport.width, desktopViewport.height, desktopViewport.znear, desktopViewport.zfar);
 
+        pass.Draw(3);
+        pass.End();
+      }
+      
+      // If OpenXR is active and we have a separate RmlUi texture, blit it over the game output.
+      if (openxr::is_initialized() && rmlOutput.texture != nullptr) {
+        const std::array attachments{
+            wgpu::RenderPassColorAttachment{
+                .view = g_currentView,
+                .loadOp = wgpu::LoadOp::Load,
+                .storeOp = wgpu::StoreOp::Store,
+            },
+        };
+        const wgpu::RenderPassDescriptor renderPassDescriptor{
+            .label = "RmlUi separate composite pass",
+            .colorAttachmentCount = attachments.size(),
+            .colorAttachments = attachments.data(),
+        };
+        const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
+        // NOTE: We need a pipeline with alpha blending for this.
+        // For now, let's assume RmlUi rendering handles its own transparency if we blit it correctly.
+        // Actually, g_CopyPipeline is opaque (alpha=1.0).
+        // I will need to create a blended copy pipeline in gpu.cpp.
+        // For now, I'll use a placeholder or wait until I add the blended pipeline.
+        pass.SetPipeline(webgpu::g_BlendCopyPipeline);
+        pass.SetBindGroup(0, rmlOutput.copyBindGroup, 0, nullptr);
+        pass.SetViewport(desktopViewport.left, desktopViewport.top, desktopViewport.width, desktopViewport.height, desktopViewport.znear, desktopViewport.zfar);
         pass.Draw(3);
         pass.End();
       }

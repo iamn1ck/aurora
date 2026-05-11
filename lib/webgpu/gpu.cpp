@@ -47,13 +47,14 @@ TextureWithSampler g_depthBuffer;
 // EFB -> XFB copy pipeline
 static wgpu::BindGroupLayout g_CopyBindGroupLayout;
 wgpu::RenderPipeline g_CopyPipeline;
+wgpu::RenderPipeline g_BlendCopyPipeline;
 wgpu::BindGroup g_CopyBindGroup;
 wgpu::Buffer g_CopyUniformBuffer;
 
 // Per-eye bind groups for the stereo XR blit (two separate uniform buffers
 // so each eye's UV offset is independent — WriteBuffer to the same buffer
 // would let the last write win across both draws).
-static wgpu::Buffer g_xrEyeUniformBuffers[2];
+wgpu::Buffer g_xrEyeUniformBuffers[2];
 wgpu::BindGroup g_xrEyeBindGroups[2];
 
 static wgpu::Adapter g_adapter;
@@ -289,6 +290,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(efb_texture, efb_sampler, uv);
     return vec4(color.rgb, 1.0);
 }
+
+@fragment
+fn fs_blend(in: VertexOutput) -> @location(0) vec4<f32> {
+    let uv = clamp(in.uv * u.uv_scale + u.uv_offset, vec2(0.0), vec2(1.0));
+    return textureSample(efb_texture, efb_sampler, uv);
+}
 )""";
   const wgpu::ShaderModuleDescriptor moduleDescriptor{
       .nextInChain = &sourceDescriptor,
@@ -362,6 +369,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
       .fragment = &fragmentState,
   };
   g_CopyPipeline = g_device.CreateRenderPipeline(&pipelineDescriptor);
+
+  // Create the blend pipeline.
+  const wgpu::BlendState blendState{
+      .color = {.operation = wgpu::BlendOperation::Add,
+                .srcFactor = wgpu::BlendFactor::One,
+                .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha},
+      .alpha = {.operation = wgpu::BlendOperation::Add,
+                .srcFactor = wgpu::BlendFactor::One,
+                .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha},
+  };
+  const std::array blendColorTargets{wgpu::ColorTargetState{
+      .format = g_graphicsConfig.surfaceConfiguration.format,
+      .blend = &blendState,
+      .writeMask = wgpu::ColorWriteMask::All,
+  }};
+  const wgpu::FragmentState blendFragmentState{
+      .module = module,
+      .entryPoint = "fs_blend",
+      .targetCount = blendColorTargets.size(),
+      .targets = blendColorTargets.data(),
+  };
+  const wgpu::RenderPipelineDescriptor blendPipelineDescriptor{
+      .layout = pipelineLayout,
+      .vertex =
+          wgpu::VertexState{
+              .module = module,
+              .entryPoint = "vs_main",
+          },
+      .primitive =
+          wgpu::PrimitiveState{
+              .topology = wgpu::PrimitiveTopology::TriangleList,
+          },
+      .multisample =
+          wgpu::MultisampleState{
+              .count = 1,
+              .mask = UINT32_MAX,
+          },
+      .fragment = &blendFragmentState,
+  };
+  g_BlendCopyPipeline = g_device.CreateRenderPipeline(&blendPipelineDescriptor);
 
   // Create the uniform buffer (16 bytes: uvOffset.xy + uvScale.xy).
   // Initialise to identity: offset=(0,0), scale=(1,1).

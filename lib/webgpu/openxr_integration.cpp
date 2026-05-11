@@ -74,6 +74,22 @@ namespace {
     VkDeviceMemory g_stagingMemory = VK_NULL_HANDLE;
     void*          g_stagingMapped = nullptr;
 
+    // Menu Swapchain
+    XrSwapchain g_xrMenuSwapchain = XR_NULL_HANDLE;
+    std::vector<XrSwapchainImageVulkanKHR> g_menuSwapchainImages;
+    uint32_t g_menuWidth = 1920;
+    uint32_t g_menuHeight = 1080;
+
+    // Menu CPU readback bridge
+    wgpu::Texture g_dawnMenuRenderTexture = nullptr;
+    wgpu::Buffer  g_dawnMenuReadbackBuffer = nullptr;
+
+    VkBuffer       g_menuStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory g_menuStagingMemory = VK_NULL_HANDLE;
+    void*          g_menuStagingMapped = nullptr;
+
+    bool g_menuUpdated = false;
+
     bool g_sessionRunning = false;
 
     // Most-recent HMD head pose (orientation only; from views[0].pose)
@@ -183,33 +199,31 @@ namespace {
         throw std::runtime_error("No suitable memory type");
     }
 
-    void create_staging_buffer(uint32_t width, uint32_t height) {
-        // width is the FULL side-by-side swapchain width (2 × per-eye).
+    void create_staging_buffer(uint32_t width, uint32_t height, VkBuffer& buffer, VkDeviceMemory& memory, void*& mapped) {
         VkDeviceSize size = (VkDeviceSize)width * height * 4;
 
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bci.size = size;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        VK_CHECK(vkCreateBuffer(g_vkDevice, &bci, nullptr, &g_stagingBuffer));
+        VK_CHECK(vkCreateBuffer(g_vkDevice, &bci, nullptr, &buffer));
 
         VkMemoryRequirements mr;
-        vkGetBufferMemoryRequirements(g_vkDevice, g_stagingBuffer, &mr);
+        vkGetBufferMemoryRequirements(g_vkDevice, buffer, &mr);
 
         VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         mai.allocationSize = mr.size;
         mai.memoryTypeIndex = find_memory_type(mr.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        VK_CHECK(vkAllocateMemory(g_vkDevice, &mai, nullptr, &g_stagingMemory));
-        VK_CHECK(vkBindBufferMemory(g_vkDevice, g_stagingBuffer, g_stagingMemory, 0));
-        VK_CHECK(vkMapMemory(g_vkDevice, g_stagingMemory, 0, size, 0, &g_stagingMapped));
+        VK_CHECK(vkAllocateMemory(g_vkDevice, &mai, nullptr, &memory));
+        VK_CHECK(vkBindBufferMemory(g_vkDevice, buffer, memory, 0));
+        VK_CHECK(vkMapMemory(g_vkDevice, memory, 0, size, 0, &mapped));
     }
 
     void create_dawn_textures() {
         if (!webgpu::g_device) return;
 
-        // The Dawn texture covers the full side-by-side width so that the
-        // blit pass can render both eyes' content into it at once.
+        // Main game textures
         wgpu::TextureDescriptor td{};
         td.size = {g_swapchainWidth, g_swapchainHeight, 1};
         td.format = wgpu::TextureFormat::RGBA8Unorm;
@@ -220,6 +234,13 @@ namespace {
         bd.size = (uint64_t)g_swapchainWidth * g_swapchainHeight * 4;
         bd.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
         g_dawnReadbackBuffer = webgpu::g_device.CreateBuffer(&bd);
+
+        // Menu textures
+        td.size = {g_menuWidth, g_menuHeight, 1};
+        g_dawnMenuRenderTexture = webgpu::g_device.CreateTexture(&td);
+
+        bd.size = (uint64_t)g_menuWidth * g_menuHeight * 4;
+        g_dawnMenuReadbackBuffer = webgpu::g_device.CreateBuffer(&bd);
     }
 }
 
@@ -316,7 +337,18 @@ bool initialize() {
         xrEnumerateSwapchainImages(g_xrSwapchain, imgCount, &imgCount,
                                    (XrSwapchainImageBaseHeader*)g_swapchainImages.data());
 
-        create_staging_buffer(g_swapchainWidth, g_swapchainHeight);
+        // Create menu swapchain
+        scCI.width = g_menuWidth;
+        scCI.height = g_menuHeight;
+        XR_CHECK(xrCreateSwapchain(g_xrSession, &scCI, &g_xrMenuSwapchain));
+
+        xrEnumerateSwapchainImages(g_xrMenuSwapchain, 0, &imgCount, nullptr);
+        g_menuSwapchainImages.resize(imgCount, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+        xrEnumerateSwapchainImages(g_xrMenuSwapchain, imgCount, &imgCount,
+                                   (XrSwapchainImageBaseHeader*)g_menuSwapchainImages.data());
+
+        create_staging_buffer(g_swapchainWidth, g_swapchainHeight, g_stagingBuffer, g_stagingMemory, g_stagingMapped);
+        create_staging_buffer(g_menuWidth, g_menuHeight, g_menuStagingBuffer, g_menuStagingMemory, g_menuStagingMapped);
         return true;
     } catch (const std::exception& e) {
         std::cerr << "OpenXR initialization failed: " << e.what() << std::endl;
@@ -328,10 +360,16 @@ bool initialize() {
 void shutdown() {
     g_dawnRenderTexture  = nullptr;
     g_dawnReadbackBuffer = nullptr;
+    g_dawnMenuRenderTexture = nullptr;
+    g_dawnMenuReadbackBuffer = nullptr;
     if (g_stagingMapped)  { vkUnmapMemory(g_vkDevice, g_stagingMemory); g_stagingMapped = nullptr; }
     if (g_stagingBuffer)  { vkDestroyBuffer(g_vkDevice, g_stagingBuffer, nullptr); g_stagingBuffer = VK_NULL_HANDLE; }
     if (g_stagingMemory)  { vkFreeMemory(g_vkDevice, g_stagingMemory, nullptr); g_stagingMemory = VK_NULL_HANDLE; }
+    if (g_menuStagingMapped) { vkUnmapMemory(g_vkDevice, g_menuStagingMemory); g_menuStagingMapped = nullptr; }
+    if (g_menuStagingBuffer) { vkDestroyBuffer(g_vkDevice, g_menuStagingBuffer, nullptr); g_menuStagingBuffer = VK_NULL_HANDLE; }
+    if (g_menuStagingMemory) { vkFreeMemory(g_vkDevice, g_menuStagingMemory, nullptr); g_menuStagingMemory = VK_NULL_HANDLE; }
     if (g_xrSwapchain)    { xrDestroySwapchain(g_xrSwapchain); g_xrSwapchain = XR_NULL_HANDLE; }
+    if (g_xrMenuSwapchain) { xrDestroySwapchain(g_xrMenuSwapchain); g_xrMenuSwapchain = XR_NULL_HANDLE; }
     if (g_xrSpace)        { xrDestroySpace(g_xrSpace); g_xrSpace = XR_NULL_HANDLE; }
     if (g_vkCommandPool)  { vkDestroyCommandPool(g_vkDevice, g_vkCommandPool, nullptr); g_vkCommandPool = VK_NULL_HANDLE; }
     if (g_vkDevice)       { vkDestroyDevice(g_vkDevice, nullptr); g_vkDevice = VK_NULL_HANDLE; }
@@ -384,6 +422,22 @@ void copy_to_shared(wgpu::CommandEncoder encoder) {
     encoder.CopyTextureToBuffer(&src, &dst, &extent);
 }
 
+void copy_menu_to_shared(wgpu::CommandEncoder encoder) {
+    if (!g_dawnMenuRenderTexture || !g_dawnMenuReadbackBuffer) return;
+
+    const wgpu::TexelCopyTextureInfo src{.texture = g_dawnMenuRenderTexture};
+    const wgpu::TexelCopyBufferInfo dst{
+        .layout = {
+            .bytesPerRow  = g_menuWidth * 4,
+            .rowsPerImage = g_menuHeight,
+        },
+        .buffer = g_dawnMenuReadbackBuffer,
+    };
+    const wgpu::Extent3D extent{g_menuWidth, g_menuHeight, 1};
+    encoder.CopyTextureToBuffer(&src, &dst, &extent);
+    g_menuUpdated = true;
+}
+
 void end_frame() {
     if (!g_sessionRunning || !g_dawnReadbackBuffer || !g_stagingMapped) return;
 
@@ -405,6 +459,23 @@ void end_frame() {
     const void* data = g_dawnReadbackBuffer.GetConstMappedRange(0, (uint64_t)g_swapchainWidth * g_swapchainHeight * 4);
     memcpy(g_stagingMapped, data, (size_t)g_swapchainWidth * g_swapchainHeight * 4);
     g_dawnReadbackBuffer.Unmap();
+
+    if (g_menuUpdated && g_dawnMenuReadbackBuffer) {
+        bool menuMapped = false;
+        g_dawnMenuReadbackBuffer.MapAsync(wgpu::MapMode::Read, 0, (uint64_t)g_menuWidth * g_menuHeight * 4,
+            wgpu::CallbackMode::AllowSpontaneous,
+            [&](wgpu::MapAsyncStatus status, wgpu::StringView) {
+                menuMapped = (status == wgpu::MapAsyncStatus::Success);
+            });
+        while (!menuMapped) {
+            webgpu::g_device.Tick();
+        }
+        if (menuMapped) {
+            const void* menuData = g_dawnMenuReadbackBuffer.GetConstMappedRange(0, (uint64_t)g_menuWidth * g_menuHeight * 4);
+            memcpy(g_menuStagingMapped, menuData, (size_t)g_menuWidth * g_menuHeight * 4);
+            g_dawnMenuReadbackBuffer.Unmap();
+        }
+    }
 
     // --- XR frame ---
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
@@ -476,6 +547,61 @@ void end_frame() {
 
         XrSwapchainImageReleaseInfo relInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         xrReleaseSwapchainImage(g_xrSwapchain, &relInfo);
+
+        if (g_menuUpdated) {
+            uint32_t menuImageIndex;
+            XrSwapchainImageAcquireInfo menuAcqInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+            xrAcquireSwapchainImage(g_xrMenuSwapchain, &menuAcqInfo, &menuImageIndex);
+
+            XrSwapchainImageWaitInfo menuSwWait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            menuSwWait.timeout = XR_INFINITE_DURATION;
+            xrWaitSwapchainImage(g_xrMenuSwapchain, &menuSwWait);
+
+            vkBeginCommandBuffer(g_vkCommandBuffer, &cbBI);
+
+            VkImageMemoryBarrier menuToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            menuToTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            menuToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            menuToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            menuToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            menuToTransfer.image = g_menuSwapchainImages[menuImageIndex].image;
+            menuToTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            menuToTransfer.srcAccessMask = 0;
+            menuToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(g_vkCommandBuffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &menuToTransfer);
+
+            VkBufferImageCopy menuRegion{};
+            menuRegion.bufferOffset      = 0;
+            menuRegion.bufferRowLength   = g_menuWidth;
+            menuRegion.bufferImageHeight = 0;
+            menuRegion.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            menuRegion.imageOffset       = {0, 0, 0};
+            menuRegion.imageExtent       = {g_menuWidth, g_menuHeight, 1};
+            vkCmdCopyBufferToImage(g_vkCommandBuffer, g_menuStagingBuffer,
+                g_menuSwapchainImages[menuImageIndex].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &menuRegion);
+
+            VkImageMemoryBarrier menuToColor{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            menuToColor.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            menuToColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            menuToColor.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            menuToColor.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            menuToColor.image = g_menuSwapchainImages[menuImageIndex].image;
+            menuToColor.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            menuToColor.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            menuToColor.dstAccessMask = 0;
+            vkCmdPipelineBarrier(g_vkCommandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &menuToColor);
+
+            vkEndCommandBuffer(g_vkCommandBuffer);
+            vkQueueSubmit(g_vkQueue, 1, &submit, VK_NULL_HANDLE);
+            vkQueueWaitIdle(g_vkQueue);
+
+            xrReleaseSwapchainImage(g_xrMenuSwapchain, &relInfo);
+        }
     }
 
     // Locate views
@@ -522,9 +648,46 @@ void end_frame() {
     layer.viewCount = 2;
     layer.views = projViews.data();
 
+    XrCompositionLayerQuad menuLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    if (g_menuUpdated) {
+        menuLayer.space = g_xrSpace;
+        menuLayer.subImage.swapchain = g_xrMenuSwapchain;
+        menuLayer.subImage.imageRect.offset = {0, 0};
+        menuLayer.subImage.imageRect.extent = {(int32_t)g_menuWidth, (int32_t)g_menuHeight};
+        
+        // Position the menu quad 1.5 meters in front of the head.
+        // We'll use the head's orientation and position.
+        const auto& headPose = views[0].pose;
+        menuLayer.pose.orientation = headPose.orientation;
+        
+        // Offset position by 1.5m along the forward vector (-Z in OpenXR)
+        const float dist = 1.5f;
+        // Basic quaternion rotation for -Z vector
+        const float qx = headPose.orientation.x;
+        const float qy = headPose.orientation.y;
+        const float qz = headPose.orientation.z;
+        const float qw = headPose.orientation.w;
+        
+        const float fwdX = 2.0f * (qx * qz - qw * qy);
+        const float fwdY = 2.0f * (qy * qz + qw * qx);
+        const float fwdZ = 1.0f - 2.0f * (qx * qx + qy * qy);
+        
+        menuLayer.pose.position.x = headPose.position.x - fwdX * dist;
+        menuLayer.pose.position.y = headPose.position.y - fwdY * dist;
+        menuLayer.pose.position.z = headPose.position.z - fwdZ * dist;
+
+        // Size in meters
+        menuLayer.size.width = 2.0f;
+        menuLayer.size.height = 2.0f * (float)g_menuHeight / (float)g_menuWidth;
+        menuLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    }
+
     std::vector<XrCompositionLayerBaseHeader*> layers;
     if (frameState.shouldRender) {
         layers.push_back((XrCompositionLayerBaseHeader*)&layer);
+        if (g_menuUpdated) {
+            layers.push_back((XrCompositionLayerBaseHeader*)&menuLayer);
+        }
     }
 
     XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
@@ -548,6 +711,11 @@ bool get_head_pose(float& ox, float& oy, float& oz, float& ow) {
 
 wgpu::TextureView get_texture_view() {
     if (g_dawnRenderTexture) return g_dawnRenderTexture.CreateView();
+    return nullptr;
+}
+
+wgpu::TextureView get_menu_texture_view() {
+    if (g_dawnMenuRenderTexture) return g_dawnMenuRenderTexture.CreateView();
     return nullptr;
 }
 

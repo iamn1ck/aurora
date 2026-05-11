@@ -347,7 +347,8 @@ void handle_event(SDL_Event& event) noexcept {
   RmlSDL::InputEventHandler(g_context, window::get_sdl_window(), event);
 }
 
-RenderOutput render(const wgpu::CommandEncoder& encoder, const webgpu::Viewport& presentViewport) noexcept {
+RenderOutput render(const wgpu::CommandEncoder& encoder, const webgpu::Viewport& presentViewport,
+                    const webgpu::TextureWithSampler* seedTarget) noexcept {
   if (g_context == nullptr) {
     return {};
   }
@@ -363,7 +364,9 @@ RenderOutput render(const wgpu::CommandEncoder& encoder, const webgpu::Viewport&
 
   auto* renderInterface = get_render_interface();
   renderInterface->SetWindowSize(g_context->GetDimensions());
-  renderInterface->BeginFrame(encoder, s_renderTarget, webgpu::present_source());
+  
+  webgpu::TextureWithSampler actualSeed = seedTarget ? *seedTarget : webgpu::TextureWithSampler{};
+  renderInterface->BeginFrame(encoder, s_renderTarget, actualSeed);
 
   Backend::BeginFrame();
   g_context->Render();

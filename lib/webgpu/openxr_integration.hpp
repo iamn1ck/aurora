@@ -13,7 +13,9 @@ void end_frame();
 
 bool is_initialized();
 wgpu::TextureView get_texture_view();
+wgpu::TextureView get_menu_texture_view();
 void copy_to_shared(wgpu::CommandEncoder encoder);
+void copy_menu_to_shared(wgpu::CommandEncoder encoder);
 uint32_t get_width();    // full side-by-side swapchain width (2 × per-eye)
 uint32_t get_height();
 uint32_t get_eye_width(); // per-eye half-width
