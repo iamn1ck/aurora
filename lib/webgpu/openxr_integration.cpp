@@ -100,6 +100,12 @@ namespace {
     XrView g_eyeViews[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
     bool   g_eyeViewsValid = false;
 
+    // Hand tracking
+    XrActionSet g_xrActionSet = XR_NULL_HANDLE;
+    XrAction    g_xrHandPoseAction = XR_NULL_HANDLE;
+    XrPath      g_handPaths[2] = {XR_NULL_PATH, XR_NULL_PATH};
+    XrSpace     g_handSpaces[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+
     bool create_vulkan_instance() {
         PFN_xrGetVulkanGraphicsRequirements2KHR pfnGetReqs = nullptr;
         xrGetInstanceProcAddr(g_xrInstance, "xrGetVulkanGraphicsRequirements2KHR",
@@ -295,7 +301,56 @@ bool initialize() {
         spCI.poseInReferenceSpace.orientation.w = 1.0f;
         XR_CHECK(xrCreateReferenceSpace(g_xrSession, &spCI, &g_xrSpace));
 
-        uint32_t vcc = 0;
+        // Hand Tracking Setup
+        XrActionSetCreateInfo actionSetInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
+        strcpy(actionSetInfo.actionSetName, "main");
+        strcpy(actionSetInfo.localizedActionSetName, "Main Actions");
+        XR_CHECK(xrCreateActionSet(g_xrInstance, &actionSetInfo, &g_xrActionSet));
+
+        xrStringToPath(g_xrInstance, "/user/hand/left", &g_handPaths[0]);
+        xrStringToPath(g_xrInstance, "/user/hand/right", &g_handPaths[1]);
+
+        XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
+        actionInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+        strcpy(actionInfo.actionName, "hand_pose");
+        strcpy(actionInfo.localizedActionName, "Hand Pose");
+        actionInfo.countSubactionPaths = 2;
+        actionInfo.subactionPaths = g_handPaths;
+        XR_CHECK(xrCreateAction(g_xrActionSet, &actionInfo, &g_xrHandPoseAction));
+
+        // Suggest bindings for KHR simple controller
+        XrPath interactionProfilePath;
+        xrStringToPath(g_xrInstance, "/interaction_profiles/khr/simple_controller", &interactionProfilePath);
+        
+        XrPath leftGripPosePath, rightGripPosePath;
+        xrStringToPath(g_xrInstance, "/user/hand/left/input/grip/pose", &leftGripPosePath);
+        xrStringToPath(g_xrInstance, "/user/hand/right/input/grip/pose", &rightGripPosePath);
+
+        std::vector<XrActionSuggestedBinding> bindings = {
+            {g_xrHandPoseAction, leftGripPosePath},
+            {g_xrHandPoseAction, rightGripPosePath}
+        };
+
+        XrInteractionProfileSuggestedBinding suggestedBindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggestedBindings.interactionProfile = interactionProfilePath;
+        suggestedBindings.suggestedBindings = bindings.data();
+        suggestedBindings.countSuggestedBindings = (uint32_t)bindings.size();
+        XR_CHECK(xrSuggestInteractionProfileBindings(g_xrInstance, &suggestedBindings));
+
+        XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+        attachInfo.countActionSets = 1;
+        attachInfo.actionSets = &g_xrActionSet;
+        XR_CHECK(xrAttachSessionActionSets(g_xrSession, &attachInfo));
+
+        for (int i = 0; i < 2; i++) {
+            XrActionSpaceCreateInfo spaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+            spaceInfo.action = g_xrHandPoseAction;
+            spaceInfo.subactionPath = g_handPaths[i];
+            spaceInfo.poseInActionSpace.orientation.w = 1.0f;
+            XR_CHECK(xrCreateActionSpace(g_xrSession, &spaceInfo, &g_handSpaces[i]));
+        }
+
+         uint32_t vcc = 0;
         xrEnumerateViewConfigurationViews(g_xrInstance, g_xrSystemId,
             XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &vcc, nullptr);
         std::vector<XrViewConfigurationView> views(vcc, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
@@ -370,6 +425,10 @@ void shutdown() {
     if (g_menuStagingMemory) { vkFreeMemory(g_vkDevice, g_menuStagingMemory, nullptr); g_menuStagingMemory = VK_NULL_HANDLE; }
     if (g_xrSwapchain)    { xrDestroySwapchain(g_xrSwapchain); g_xrSwapchain = XR_NULL_HANDLE; }
     if (g_xrMenuSwapchain) { xrDestroySwapchain(g_xrMenuSwapchain); g_xrMenuSwapchain = XR_NULL_HANDLE; }
+    if (g_handSpaces[0])  { xrDestroySpace(g_handSpaces[0]); g_handSpaces[0] = XR_NULL_HANDLE; }
+    if (g_handSpaces[1])  { xrDestroySpace(g_handSpaces[1]); g_handSpaces[1] = XR_NULL_HANDLE; }
+    if (g_xrHandPoseAction) { xrDestroyAction(g_xrHandPoseAction); g_xrHandPoseAction = XR_NULL_HANDLE; }
+    if (g_xrActionSet)      { xrDestroyActionSet(g_xrActionSet); g_xrActionSet = XR_NULL_HANDLE; }
     if (g_xrSpace)        { xrDestroySpace(g_xrSpace); g_xrSpace = XR_NULL_HANDLE; }
     if (g_vkCommandPool)  { vkDestroyCommandPool(g_vkDevice, g_vkCommandPool, nullptr); g_vkCommandPool = VK_NULL_HANDLE; }
     if (g_vkDevice)       { vkDestroyDevice(g_vkDevice, nullptr); g_vkDevice = VK_NULL_HANDLE; }
@@ -484,6 +543,13 @@ void end_frame() {
 
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     xrBeginFrame(g_xrSession, &beginInfo);
+
+    // Sync actions
+    XrActiveActionSet activeActionSet{g_xrActionSet, XR_NULL_PATH};
+    XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    xrSyncActions(g_xrSession, &syncInfo);
 
     if (frameState.shouldRender) {
         uint32_t imageIndex;
@@ -655,30 +721,42 @@ void end_frame() {
         menuLayer.subImage.imageRect.offset = {0, 0};
         menuLayer.subImage.imageRect.extent = {(int32_t)g_menuWidth, (int32_t)g_menuHeight};
         
-        // Position the menu quad 1.5 meters in front of the head.
-        // We'll use the head's orientation and position.
-        const auto& headPose = views[0].pose;
-        menuLayer.pose.orientation = headPose.orientation;
-        
-        // Offset position by 1.5m along the forward vector (-Z in OpenXR)
-        const float dist = 1.5f;
-        // Basic quaternion rotation for -Z vector
-        const float qx = headPose.orientation.x;
-        const float qy = headPose.orientation.y;
-        const float qz = headPose.orientation.z;
-        const float qw = headPose.orientation.w;
-        
-        const float fwdX = 2.0f * (qx * qz - qw * qy);
-        const float fwdY = 2.0f * (qy * qz + qw * qx);
-        const float fwdZ = 1.0f - 2.0f * (qx * qx + qy * qy);
-        
-        menuLayer.pose.position.x = headPose.position.x - fwdX * dist;
-        menuLayer.pose.position.y = headPose.position.y - fwdY * dist;
-        menuLayer.pose.position.z = headPose.position.z - fwdZ * dist;
+        // Position the menu quad on the player's left hand.
+        XrSpaceLocation handLocation{XR_TYPE_SPACE_LOCATION};
+        xrLocateSpace(g_handSpaces[0], g_xrSpace, frameState.predictedDisplayTime, &handLocation);
+
+        if (handLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
+            menuLayer.pose = handLocation.pose;
+            
+            // If the orientation is also valid, we can use it.
+            // Note: Depending on the controller, we might want to rotate it
+            // so it faces the user.
+            if (!(handLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+                menuLayer.pose.orientation = {0, 0, 0, 1};
+            }
+        } else {
+            // Fallback to head-relative positioning if hand is not tracked.
+            const auto& headPose = views[0].pose;
+            menuLayer.pose.orientation = headPose.orientation;
+            
+            const float dist = 1.5f;
+            const float qx = headPose.orientation.x;
+            const float qy = headPose.orientation.y;
+            const float qz = headPose.orientation.z;
+            const float qw = headPose.orientation.w;
+            
+            const float fwdX = 2.0f * (qx * qz - qw * qy);
+            const float fwdY = 2.0f * (qy * qz + qw * qx);
+            const float fwdZ = 1.0f - 2.0f * (qx * qx + qy * qy);
+            
+            menuLayer.pose.position.x = headPose.position.x - fwdX * dist;
+            menuLayer.pose.position.y = headPose.position.y - fwdY * dist;
+            menuLayer.pose.position.z = headPose.position.z - fwdZ * dist;
+        }
 
         // Size in meters
-        menuLayer.size.width = 2.0f;
-        menuLayer.size.height = 2.0f * (float)g_menuHeight / (float)g_menuWidth;
+        menuLayer.size.width = 1.0f; // Reduced size from 2.0m to 1.0m for hand-held
+        menuLayer.size.height = 1.0f * (float)g_menuHeight / (float)g_menuWidth;
         menuLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
     }
 
