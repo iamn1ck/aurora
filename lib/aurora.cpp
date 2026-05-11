@@ -288,14 +288,21 @@ void end_frame() noexcept {
           if (openxr::get_eye_info(eye, ei)) {
             const float fovWidth = ei.tanLeft + ei.tanRight;
             if (fovWidth > 0.0f) {
-              // ei.poseX is +IPD/2 for the right eye and -IPD/2 for the left eye.
-              // To converge the flat game plane at a comfortable distance (e.g. 2 meters),
-              // we must shift the right eye's image to the LEFT on the screen (which means
-              // sampling the source UV to the RIGHT, so positive offset).
-              // Using positive ei.poseX gives a positive offset for the right eye.
+              // Headsets often have asymmetric FOVs (larger outwards than inwards).
+              // If we map our texture from u=0 to u=1, the center of the texture (u=0.5)
+              // will be projected outwards, causing severe divergence and double vision.
+              // We must shift the UVs so that the center of the texture aligns with
+              // physical "straight ahead" (tangent = 0).
+              // In the projection plane, the left edge is -tanLeft, total width is fovWidth.
+              // Straight ahead is at u = tanLeft / fovWidth.
+              // We want this u to map to game_u = 0.5. So offset = 0.5 - u.
+              const float center_offset = 0.5f - (ei.tanLeft / fovWidth);
+
+              // Add the convergence shift to bring the virtual screen to 2.0 meters.
               const float virtual_distance = 2.0f; // meters
-              const float angular_shift = std::atan(ei.poseX / virtual_distance);
-              eyeOffsets[eye] = angular_shift / fovWidth;
+              const float convergence_shift = (ei.poseX / virtual_distance) / fovWidth;
+              
+              eyeOffsets[eye] = center_offset + convergence_shift;
             }
           }
         }
