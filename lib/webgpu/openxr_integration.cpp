@@ -12,6 +12,7 @@
 #include <vector>
 #include <stdexcept>
 #include <cstring>
+#include <cmath>
 #include <unistd.h>
 
 #define XR_CHECK(cmd) \
@@ -52,8 +53,11 @@ namespace {
     // Swapchain
     XrSwapchain g_xrSwapchain = XR_NULL_HANDLE;
     std::vector<XrSwapchainImageVulkanKHR> g_swapchainImages;
+    // g_swapchainWidth is the TOTAL width of the side-by-side swapchain (2 × per-eye).
+    // g_eyeWidth is the width of a single eye's sub-rect.
     uint32_t g_swapchainWidth = 0;
     uint32_t g_swapchainHeight = 0;
+    uint32_t g_eyeWidth = 0;
 
     // CPU readback bridge: Dawn -> wgpu readback buffer -> CPU -> VkBuffer staging -> XR swapchain
     wgpu::Texture g_dawnRenderTexture = nullptr;
@@ -68,6 +72,10 @@ namespace {
     // Most-recent HMD head pose (orientation only; from views[0].pose)
     XrQuaternionf g_headOrientation{0.0f, 0.0f, 0.0f, 1.0f};
     bool          g_headPoseValid = false;
+
+    // Most-recent per-eye views, stored after xrLocateViews for the stereo blit.
+    XrView g_eyeViews[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+    bool   g_eyeViewsValid = false;
 
     bool create_vulkan_instance() {
         PFN_xrGetVulkanGraphicsRequirements2KHR pfnGetReqs = nullptr;
@@ -169,6 +177,7 @@ namespace {
     }
 
     void create_staging_buffer(uint32_t width, uint32_t height) {
+        // width is the FULL side-by-side swapchain width (2 × per-eye).
         VkDeviceSize size = (VkDeviceSize)width * height * 4;
 
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -192,6 +201,8 @@ namespace {
     void create_dawn_textures() {
         if (!webgpu::g_device) return;
 
+        // The Dawn texture covers the full side-by-side width so that the
+        // blit pass can render both eyes' content into it at once.
         wgpu::TextureDescriptor td{};
         td.size = {g_swapchainWidth, g_swapchainHeight, 1};
         td.format = wgpu::TextureFormat::RGBA8Unorm;
@@ -248,7 +259,9 @@ bool initialize() {
         xrEnumerateViewConfigurationViews(g_xrInstance, g_xrSystemId,
             XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, vcc, &vcc, views.data());
 
-        g_swapchainWidth  = views[0].recommendedImageRectWidth;
+        // Store per-eye dimensions; the swapchain will be twice as wide (side-by-side).
+        g_eyeWidth        = views[0].recommendedImageRectWidth;
+        g_swapchainWidth  = g_eyeWidth * 2; // side-by-side: left eye | right eye
         g_swapchainHeight = views[0].recommendedImageRectHeight;
 
         uint32_t fmtCount = 0;
@@ -268,7 +281,7 @@ bool initialize() {
         scCI.usageFlags  = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         scCI.format      = selectedFmt;
         scCI.sampleCount = views[0].recommendedSwapchainSampleCount;
-        scCI.width       = g_swapchainWidth;
+        scCI.width       = g_swapchainWidth; // full side-by-side width
         scCI.height      = g_swapchainHeight;
         scCI.faceCount   = 1;
         scCI.arraySize   = 1;
@@ -408,7 +421,7 @@ void end_frame() {
 
         VkBufferImageCopy region{};
         region.bufferOffset      = 0;
-        region.bufferRowLength   = 0;
+        region.bufferRowLength   = g_swapchainWidth; // full side-by-side row stride
         region.bufferImageHeight = 0;
         region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageOffset       = {0, 0, 0};
@@ -453,7 +466,7 @@ void end_frame() {
     std::vector<XrView> views(2, {XR_TYPE_VIEW});
     xrLocateViews(g_xrSession, &vli, &viewState, 2, &viewCount, views.data());
 
-    // Store the head orientation from the first view's pose for the game camera.
+    // Store the head orientation and per-eye view data from xrLocateViews.
     // We use the orientation validity flag from viewState; if both position and
     // orientation bits are set the pose is fully tracked.
     if ((viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) && viewCount >= 1) {
@@ -461,6 +474,14 @@ void end_frame() {
         g_headPoseValid = true;
     } else {
         g_headPoseValid = false;
+    }
+    if ((viewState.viewStateFlags & (XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT)) &&
+        viewCount == 2) {
+        g_eyeViews[0] = views[0];
+        g_eyeViews[1] = views[1];
+        g_eyeViewsValid = true;
+    } else {
+        g_eyeViewsValid = false;
     }
 
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -470,7 +491,10 @@ void end_frame() {
         projViews[i].pose = views[i].pose;
         projViews[i].fov  = views[i].fov;
         projViews[i].subImage.swapchain = g_xrSwapchain;
-        projViews[i].subImage.imageRect.extent = {(int32_t)g_swapchainWidth, (int32_t)g_swapchainHeight};
+        // Each eye gets its own non-overlapping horizontal half of the
+        // side-by-side swapchain image (left eye at x=0, right eye at x=eyeWidth).
+        projViews[i].subImage.imageRect.offset = {(int32_t)(i * g_eyeWidth), 0};
+        projViews[i].subImage.imageRect.extent = {(int32_t)g_eyeWidth, (int32_t)g_swapchainHeight};
     }
     layer.viewCount = 2;
     layer.views = projViews.data();
@@ -504,7 +528,16 @@ wgpu::TextureView get_texture_view() {
     return nullptr;
 }
 
-uint32_t get_width()  { return g_swapchainWidth; }
+uint32_t get_width()  { return g_swapchainWidth; }  // full side-by-side width
 uint32_t get_height() { return g_swapchainHeight; }
+uint32_t get_eye_width() { return g_eyeWidth; }       // per-eye half-width
+
+bool get_eye_info(int eye, XrEyeInfo& out) {
+    if (!g_eyeViewsValid || eye < 0 || eye > 1) return false;
+    out.poseX    = g_eyeViews[eye].pose.position.x;
+    out.tanLeft  = std::tan(-g_eyeViews[eye].fov.angleLeft);  // angleLeft is negative
+    out.tanRight = std::tan( g_eyeViews[eye].fov.angleRight);
+    return true;
+}
 
 } // namespace aurora::openxr

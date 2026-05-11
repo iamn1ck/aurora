@@ -49,7 +49,12 @@ extern TextureWithSampler g_frameBufferResolved;
 extern TextureWithSampler g_depthBuffer;
 extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
+extern wgpu::Buffer g_CopyUniformBuffer;
 extern wgpu::Instance g_instance;
+
+// Update the UV offset/scale uniform used by the copy (blit) pipeline.
+// Default is offset=(0,0), scale=(1,1) — a 1:1 passthrough blit.
+void update_copy_uniforms(float uvOffsetX, float uvOffsetY, float uvScaleX, float uvScaleY);
 
 bool initialize(AuroraBackend backend);
 void shutdown();

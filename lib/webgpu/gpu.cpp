@@ -44,6 +44,7 @@ TextureWithSampler g_depthBuffer;
 static wgpu::BindGroupLayout g_CopyBindGroupLayout;
 wgpu::RenderPipeline g_CopyPipeline;
 wgpu::BindGroup g_CopyBindGroup;
+wgpu::Buffer g_CopyUniformBuffer;
 
 static wgpu::Adapter g_adapter;
 wgpu::Instance g_instance;
@@ -241,6 +242,13 @@ var efb_sampler: sampler;
 @group(0) @binding(1)
 var efb_texture: texture_2d<f32>;
 
+struct CopyUniforms {
+    uv_offset: vec2<f32>,
+    uv_scale:  vec2<f32>,
+};
+@group(0) @binding(2)
+var<uniform> u: CopyUniforms;
+
 struct VertexOutput {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -267,7 +275,8 @@ fn vs_main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = textureSample(efb_texture, efb_sampler, in.uv);
+    let uv = clamp(in.uv * u.uv_scale + u.uv_offset, vec2(0.0), vec2(1.0));
+    let color = textureSample(efb_texture, efb_sampler, uv);
     return vec4(color.rgb, 1.0);
 }
 )""";
@@ -304,6 +313,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                   .viewDimension = wgpu::TextureViewDimension::e2D,
               },
       },
+      wgpu::BindGroupLayoutEntry{
+          .binding = 2,
+          .visibility = wgpu::ShaderStage::Fragment,
+          .buffer =
+              wgpu::BufferBindingLayout{
+                  .type = wgpu::BufferBindingType::Uniform,
+                  .minBindingSize = sizeof(float) * 4,
+              },
+      },
   };
   const wgpu::BindGroupLayoutDescriptor bindGroupLayoutDescriptor{
       .entryCount = bindGroupLayoutEntries.size(),
@@ -334,6 +352,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
       .fragment = &fragmentState,
   };
   g_CopyPipeline = g_device.CreateRenderPipeline(&pipelineDescriptor);
+
+  // Create the uniform buffer (16 bytes: uvOffset.xy + uvScale.xy).
+  // Initialise to identity: offset=(0,0), scale=(1,1).
+  const float defaultUniforms[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  const wgpu::BufferDescriptor uniformBufDesc{
+      .label = "Copy Uniform Buffer",
+      .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
+      .size = sizeof(defaultUniforms),
+  };
+  g_CopyUniformBuffer = g_device.CreateBuffer(&uniformBufDesc);
+  g_queue.WriteBuffer(g_CopyUniformBuffer, 0, defaultUniforms, sizeof(defaultUniforms));
 }
 
 wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
@@ -346,6 +375,11 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
           .binding = 1,
           .textureView = source.view,
       },
+      wgpu::BindGroupEntry{
+          .binding = 2,
+          .buffer = g_CopyUniformBuffer,
+          .size = sizeof(float) * 4,
+      },
   };
   const wgpu::BindGroupDescriptor bindGroupDescriptor{
       .layout = g_CopyBindGroupLayout,
@@ -353,6 +387,11 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
       .entries = bindGroupEntries.data(),
   };
   return g_device.CreateBindGroup(&bindGroupDescriptor);
+}
+
+void update_copy_uniforms(float uvOffsetX, float uvOffsetY, float uvScaleX, float uvScaleY) {
+  const float data[4] = {uvOffsetX, uvOffsetY, uvScaleX, uvScaleY};
+  g_queue.WriteBuffer(g_CopyUniformBuffer, 0, data, sizeof(data));
 }
 
 static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
@@ -660,6 +699,7 @@ void shutdown() {
   g_CopyBindGroupLayout = {};
   g_CopyPipeline = {};
   g_CopyBindGroup = {};
+  g_CopyUniformBuffer = {};
   g_frameBuffer = {};
   g_frameBufferResolved = {};
   g_depthBuffer = {};
