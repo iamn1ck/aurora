@@ -144,11 +144,14 @@ struct RenderPass {
   CommandList commands;
   bool clearColor = true;
   bool clearDepth = true;
+  bool isMenu = false;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 };
 static std::vector<RenderPass> g_renderPasses;
 static u32 g_currentRenderPass = UINT32_MAX;
 static bool g_inOffscreen = false;
+static wgpu::TextureView g_menuView;
+static bool g_menuCleared = false;
 static std::optional<RenderPass> g_suspendedEfbPass;
 static Viewport g_suspendedEfbViewport;
 static ClipRect g_suspendedEfbScissor;
@@ -326,6 +329,7 @@ void clear_caches() noexcept {
   g_offscreenCache.clear();
   g_cachedBindGroups.clear();
 }
+
 
 static OffscreenCacheEntry get_offscreen_textures(uint32_t width, uint32_t height) {
   OffscreenCacheKey key{width, height};
@@ -615,6 +619,41 @@ void shutdown() {
   s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
 }
 
+void set_menu_view(wgpu::TextureView view) noexcept {
+  g_menuView = view;
+}
+
+void switch_to_menu_render(bool menu) noexcept {
+  if (g_currentRenderPass == UINT32_MAX || g_inOffscreen) return;
+  auto& currentPass = g_renderPasses[g_currentRenderPass];
+  if (currentPass.isMenu == menu) return;
+
+  // If menu texture is not available, we can't switch to it.
+  if (menu && !g_menuView) return;
+
+  // Start a new pass
+  RenderPass newPass;
+  if (menu) {
+    newPass.colorView = g_menuView;
+    newPass.resolveView = nullptr;
+    newPass.depthView = nullptr; // UI usually doesn't need depth
+    newPass.targetSize = {1920, 1080, 1}; // Standard menu size
+    newPass.msaaSamples = 1;
+    newPass.clearColor = !g_menuCleared;
+    newPass.clearDepth = false;
+    newPass.clearColorValue = {0.f, 0.f, 0.f, 0.f};
+    newPass.isMenu = true;
+    g_menuCleared = true;
+  } else {
+    set_efb_targets(newPass);
+    newPass.clearColor = false;
+    newPass.clearDepth = false;
+    newPass.isMenu = false;
+  }
+  g_renderPasses.emplace_back(std::move(newPass));
+  ++g_currentRenderPass;
+}
+
 void map_staging_buffer() {
   auto expected = BufferMapState::Unmapped;
   if (!s_mappingState.compare_exchange_strong(expected, BufferMapState::Mapping, std::memory_order_acq_rel,
@@ -684,6 +723,7 @@ bool begin_frame() {
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
   begin_pipeline_frame();
+  g_menuCleared = false;
   return true;
 }
 
@@ -793,7 +833,7 @@ void render(wgpu::CommandEncoder& cmd) {
         .label = label.c_str(),
         .colorAttachmentCount = attachments.size(),
         .colorAttachments = attachments.data(),
-        .depthStencilAttachment = &depthStencilAttachment,
+        .depthStencilAttachment = passInfo.depthView ? &depthStencilAttachment : nullptr,
     };
 
     auto pass = cmd.BeginRenderPass(&renderPassDescriptor);

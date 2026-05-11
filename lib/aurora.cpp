@@ -250,6 +250,9 @@ bool begin_frame() noexcept {
 void end_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+  if (openxr::is_initialized()) {
+    gfx::set_menu_view(openxr::get_menu_texture_view());
+  }
   gx::fifo::drain();
   const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
       .label = "Redraw encoder",
@@ -354,7 +357,7 @@ void end_frame() noexcept {
             const std::array menuAttachments{
                 wgpu::RenderPassColorAttachment{
                     .view = menuView,
-                    .loadOp = wgpu::LoadOp::Clear,
+                    .loadOp = wgpu::LoadOp::Load, // Keep GameCube 2D content
                     .storeOp = wgpu::StoreOp::Store,
                 },
             };
@@ -364,7 +367,7 @@ void end_frame() noexcept {
                 .colorAttachments = menuAttachments.data(),
             };
             const auto menuPass = encoder.BeginRenderPass(&menuPassDesc);
-            menuPass.SetPipeline(webgpu::g_CopyPipeline);
+            menuPass.SetPipeline(webgpu::g_BlendCopyPipeline); // Use blending
             menuPass.SetBindGroup(0, rmlOutput.copyBindGroup, 0, nullptr);
             menuPass.Draw(3);
             menuPass.End();

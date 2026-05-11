@@ -1595,6 +1595,7 @@ static ByteBuffer handle_draw_unmerged_idxBuf;
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange) {
   ZoneScoped;
+  gfx::switch_to_menu_render(g_gxState.projType == GX_ORTHOGRAPHIC);
   u32 numIndices = 0;
   gfx::Range idxRange;
 
