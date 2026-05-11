@@ -418,13 +418,13 @@ static wgpu::BindGroup create_copy_bind_group_with_uniform(const TextureWithSamp
 // Write per-eye UV offsets into the two eye-specific uniform buffers.
 // Must be called BEFORE the XR stereo render pass begins.  Each eye writes
 // to its own buffer so the writes do not overwrite each other at submit time.
-void prepare_xr_stereo_uniforms(float leftOffsetX, float rightOffsetX) {
-  auto write = [&](int eye, float offsetX) {
-    const float data[4] = {offsetX, 0.0f, 1.0f, 1.0f};
+void prepare_xr_stereo_uniforms(float leftOffsetX, float leftOffsetY, float rightOffsetX, float rightOffsetY) {
+  auto write = [&](int eye, float offsetX, float offsetY) {
+    const float data[4] = {offsetX, offsetY, 1.0f, 1.0f};
     g_queue.WriteBuffer(g_xrEyeUniformBuffers[eye], 0, data, sizeof(data));
   };
-  write(0, leftOffsetX);
-  write(1, rightOffsetX);
+  write(0, leftOffsetX, leftOffsetY);
+  write(1, rightOffsetX, rightOffsetY);
 }
 
 void update_copy_uniforms(float uvOffsetX, float uvOffsetY, float uvScaleX, float uvScaleY) {
@@ -777,7 +777,12 @@ bool refresh_surface(bool recreate) {
   uint32_t height = g_graphicsConfig.surfaceConfiguration.height;
   uint32_t native_width = width;
   uint32_t native_height = height;
-  if (window::get_sdl_window() != nullptr) {
+  if (openxr::is_initialized()) {
+    width = openxr::get_eye_width();
+    height = openxr::get_height();
+    native_width = width;
+    native_height = height;
+  } else if (window::get_sdl_window() != nullptr) {
     const auto size = window::get_window_size();
     width = size.fb_width;
     height = size.fb_height;

@@ -282,35 +282,37 @@ void end_frame() noexcept {
         // Dividing by the total horizontal FOV extent (in tangent space) gives
         // the fraction of the screen width to shift.  Negate so a left eye
         // (negative poseX) shifts the sampled UV region to the right.
-        float eyeOffsets[2] = {0.0f, 0.0f};
+        float eyeOffsetsX[2] = {0.0f, 0.0f};
+        float eyeOffsetsY[2] = {0.0f, 0.0f};
         for (int eye = 0; eye < 2; ++eye) {
           openxr::XrEyeInfo ei{};
           if (openxr::get_eye_info(eye, ei)) {
             const float fovWidth = ei.tanLeft + ei.tanRight;
             if (fovWidth > 0.0f) {
               // Headsets often have asymmetric FOVs (larger outwards than inwards).
-              // If we map our texture from u=0 to u=1, the center of the texture (u=0.5)
-              // will be projected outwards, causing severe divergence and double vision.
-              // We must shift the UVs so that the center of the texture aligns with
-              // physical "straight ahead" (tangent = 0).
-              // In the projection plane, the left edge is -tanLeft, total width is fovWidth.
               // Straight ahead is at u = tanLeft / fovWidth.
               // We want this u to map to game_u = 0.5. So offset = 0.5 - u.
-              const float center_offset = 0.5f - (ei.tanLeft / fovWidth);
+              const float center_offsetX = 0.5f - (ei.tanLeft / fovWidth);
 
               // Add the convergence shift to bring the virtual screen to 2.0 meters.
               const float virtual_distance = 2.0f; // meters
               const float convergence_shift = (ei.poseX / virtual_distance) / fovWidth;
               
-              eyeOffsets[eye] = center_offset + convergence_shift;
+              eyeOffsetsX[eye] = center_offsetX + convergence_shift;
+            }
+
+            const float fovHeight = ei.tanUp + ei.tanDown;
+            if (fovHeight > 0.0f) {
+              // Vertical straight ahead is at v = tanUp / fovHeight.
+              // We want this v to map to game_v = 0.5. So offset = 0.5 - v.
+              eyeOffsetsY[eye] = 0.5f - (ei.tanUp / fovHeight);
             }
           }
         }
 
         // Write BOTH eye uniforms to their respective buffers BEFORE the render
-        // pass begins.  Each eye has its own buffer so the two WriteBuffer
-        // submissions do not overwrite each other at queue-submit time.
-        webgpu::prepare_xr_stereo_uniforms(eyeOffsets[0], eyeOffsets[1]);
+        // pass begins.
+        webgpu::prepare_xr_stereo_uniforms(eyeOffsetsX[0], eyeOffsetsY[0], eyeOffsetsX[1], eyeOffsetsY[1]);
 
         const std::array xrAttachments{
             wgpu::RenderPassColorAttachment{

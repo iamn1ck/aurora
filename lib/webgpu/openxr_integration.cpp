@@ -572,6 +572,8 @@ bool get_eye_info(int eye, XrEyeInfo& out) {
     out.poseX    = (eye == 0) ? (-ipd * 0.5f) : (ipd * 0.5f);
     out.tanLeft  = std::tan(-g_eyeViews[eye].fov.angleLeft);  // angleLeft is negative
     out.tanRight = std::tan( g_eyeViews[eye].fov.angleRight);
+    out.tanUp    = std::tan( g_eyeViews[eye].fov.angleUp);
+    out.tanDown  = std::tan(-g_eyeViews[eye].fov.angleDown); // angleDown is negative
     return true;
 }
 
