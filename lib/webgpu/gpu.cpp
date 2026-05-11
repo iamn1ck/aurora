@@ -31,6 +31,10 @@ void clear_offscreen_cache();
 namespace aurora::webgpu {
 static Module Log("aurora::gpu");
 
+// Forward declaration (defined after create_copy_pipeline).
+static wgpu::BindGroup create_copy_bind_group_with_uniform(const TextureWithSampler& source,
+                                                            const wgpu::Buffer& uniformBuf);
+
 wgpu::Device g_device;
 wgpu::Queue g_queue;
 wgpu::Surface g_surface;
@@ -45,6 +49,12 @@ static wgpu::BindGroupLayout g_CopyBindGroupLayout;
 wgpu::RenderPipeline g_CopyPipeline;
 wgpu::BindGroup g_CopyBindGroup;
 wgpu::Buffer g_CopyUniformBuffer;
+
+// Per-eye bind groups for the stereo XR blit (two separate uniform buffers
+// so each eye's UV offset is independent — WriteBuffer to the same buffer
+// would let the last write win across both draws).
+static wgpu::Buffer g_xrEyeUniformBuffers[2];
+wgpu::BindGroup g_xrEyeBindGroups[2];
 
 static wgpu::Adapter g_adapter;
 wgpu::Instance g_instance;
@@ -363,9 +373,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   };
   g_CopyUniformBuffer = g_device.CreateBuffer(&uniformBufDesc);
   g_queue.WriteBuffer(g_CopyUniformBuffer, 0, defaultUniforms, sizeof(defaultUniforms));
+
+  // Also initialise per-eye uniform buffers for stereo blitting.
+  for (int i = 0; i < 2; ++i) {
+    const wgpu::BufferDescriptor eyeBufDesc{
+        .label = i == 0 ? "XR Eye0 Uniform Buffer" : "XR Eye1 Uniform Buffer",
+        .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
+        .size = sizeof(defaultUniforms),
+    };
+    g_xrEyeUniformBuffers[i] = g_device.CreateBuffer(&eyeBufDesc);
+    g_queue.WriteBuffer(g_xrEyeUniformBuffers[i], 0, defaultUniforms, sizeof(defaultUniforms));
+  }
 }
 
 wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
+  return create_copy_bind_group_with_uniform(source, g_CopyUniformBuffer);
+}
+
+static wgpu::BindGroup create_copy_bind_group_with_uniform(const TextureWithSampler& source,
+                                                            const wgpu::Buffer& uniformBuf) {
   const std::array bindGroupEntries{
       wgpu::BindGroupEntry{
           .binding = 0,
@@ -377,7 +403,7 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
       },
       wgpu::BindGroupEntry{
           .binding = 2,
-          .buffer = g_CopyUniformBuffer,
+          .buffer = uniformBuf,
           .size = sizeof(float) * 4,
       },
   };
@@ -387,6 +413,18 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
       .entries = bindGroupEntries.data(),
   };
   return g_device.CreateBindGroup(&bindGroupDescriptor);
+}
+
+// Write per-eye UV offsets into the two eye-specific uniform buffers.
+// Must be called BEFORE the XR stereo render pass begins.  Each eye writes
+// to its own buffer so the writes do not overwrite each other at submit time.
+void prepare_xr_stereo_uniforms(float leftOffsetX, float rightOffsetX) {
+  auto write = [&](int eye, float offsetX) {
+    const float data[4] = {offsetX, 0.0f, 1.0f, 1.0f};
+    g_queue.WriteBuffer(g_xrEyeUniformBuffers[eye], 0, data, sizeof(data));
+  };
+  write(0, leftOffsetX);
+  write(1, rightOffsetX);
 }
 
 void update_copy_uniforms(float uvOffsetX, float uvOffsetY, float uvScaleX, float uvScaleY) {
@@ -700,6 +738,10 @@ void shutdown() {
   g_CopyPipeline = {};
   g_CopyBindGroup = {};
   g_CopyUniformBuffer = {};
+  for (int i = 0; i < 2; ++i) {
+    g_xrEyeBindGroups[i] = {};
+    g_xrEyeUniformBuffers[i] = {};
+  }
   g_frameBuffer = {};
   g_frameBufferResolved = {};
   g_depthBuffer = {};
@@ -771,6 +813,10 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
   g_frameBufferResolved = create_render_texture(width, height, false);
   g_depthBuffer = create_depth_texture(width, height);
   g_CopyBindGroup = create_copy_bind_group(present_source());
+  // Rebuild the per-eye XR bind groups to point at the new EFB texture.
+  for (int i = 0; i < 2; ++i) {
+    g_xrEyeBindGroups[i] = create_copy_bind_group_with_uniform(present_source(), g_xrEyeUniformBuffers[i]);
+  }
 }
 } // namespace aurora::webgpu
 

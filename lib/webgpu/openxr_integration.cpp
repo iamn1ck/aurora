@@ -534,7 +534,19 @@ uint32_t get_eye_width() { return g_eyeWidth; }       // per-eye half-width
 
 bool get_eye_info(int eye, XrEyeInfo& out) {
     if (!g_eyeViewsValid || eye < 0 || eye > 1) return false;
-    out.poseX    = g_eyeViews[eye].pose.position.x;
+
+    // The views[].pose is in the absolute tracking space, so position.x is NOT the
+    // local eye offset! We must compute the distance between the two eyes (IPD)
+    // and assume the head is exactly in the middle.
+    const auto& p0 = g_eyeViews[0].pose.position;
+    const auto& p1 = g_eyeViews[1].pose.position;
+    const float dx = p1.x - p0.x;
+    const float dy = p1.y - p0.y;
+    const float dz = p1.z - p0.z;
+    const float ipd = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    // Left eye is index 0, right is index 1.
+    out.poseX    = (eye == 0) ? (-ipd * 0.5f) : (ipd * 0.5f);
     out.tanLeft  = std::tan(-g_eyeViews[eye].fov.angleLeft);  // angleLeft is negative
     out.tanRight = std::tan( g_eyeViews[eye].fov.angleRight);
     return true;

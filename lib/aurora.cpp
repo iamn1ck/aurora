@@ -274,8 +274,31 @@ void end_frame() noexcept {
     if (openxr::is_initialized()) {
       wgpu::TextureView xrView = openxr::get_texture_view();
       if (xrView) {
-        // The side-by-side XR Dawn texture is the render target for both passes.
-        // We use a single render-pass with Load so the second eye doesn't clear the first.
+        const float eyeW = static_cast<float>(openxr::get_eye_width());
+        const float eyeH = static_cast<float>(openxr::get_height());
+
+        // Compute per-eye UV offsets from the XR-reported IPD.
+        // poseX is the eye's X offset from the head centre in metres.
+        // Dividing by the total horizontal FOV extent (in tangent space) gives
+        // the fraction of the screen width to shift.  Negate so a left eye
+        // (negative poseX) shifts the sampled UV region to the right.
+        float eyeOffsets[2] = {0.0f, 0.0f};
+        for (int eye = 0; eye < 2; ++eye) {
+          openxr::XrEyeInfo ei{};
+          if (openxr::get_eye_info(eye, ei)) {
+            const float fovWidth = ei.tanLeft + ei.tanRight;
+            if (fovWidth > 0.0f) {
+              const float stereo_mult = 1.0f; // Debug: adjust this to increase/decrease depth effect
+              eyeOffsets[eye] = (-ei.poseX / fovWidth) * stereo_mult;
+            }
+          }
+        }
+
+        // Write BOTH eye uniforms to their respective buffers BEFORE the render
+        // pass begins.  Each eye has its own buffer so the two WriteBuffer
+        // submissions do not overwrite each other at queue-submit time.
+        webgpu::prepare_xr_stereo_uniforms(eyeOffsets[0], eyeOffsets[1]);
+
         const std::array xrAttachments{
             wgpu::RenderPassColorAttachment{
                 .view = xrView,
@@ -290,28 +313,10 @@ void end_frame() noexcept {
         };
         const auto xrPass = encoder.BeginRenderPass(&xrPassDesc);
         xrPass.SetPipeline(webgpu::g_CopyPipeline);
-        xrPass.SetBindGroup(0, presentBindGroup, 0, nullptr);
-
-        const float eyeW = static_cast<float>(openxr::get_eye_width());
-        const float eyeH = static_cast<float>(openxr::get_height());
 
         for (int eye = 0; eye < 2; ++eye) {
-          // Compute the UV horizontal shift for this eye.
-          // poseX is the eye's offset from head centre in metres.
-          // The horizontal FOV half-extents in tangent space give the total
-          // angular width of the view; dividing poseX by fovWidth gives the
-          // fraction of the screen to shift.  Negate so a left eye (negative X)
-          // shifts the sampled region to the right (showing more of the left).
-          openxr::XrEyeInfo ei{};
-          float uvOffsetX = 0.0f;
-          if (openxr::get_eye_info(eye, ei)) {
-            const float fovWidth = ei.tanLeft + ei.tanRight;
-            if (fovWidth > 0.0f) {
-              uvOffsetX = -ei.poseX / fovWidth;
-            }
-          }
-          webgpu::update_copy_uniforms(uvOffsetX, 0.0f, 1.0f, 1.0f);
-
+          // Switch to the per-eye bind group (different uniform buffer per eye).
+          xrPass.SetBindGroup(0, webgpu::g_xrEyeBindGroups[eye], 0, nullptr);
           xrPass.SetViewport(
               static_cast<float>(eye) * eyeW, 0.0f,
               eyeW, eyeH,
@@ -319,9 +324,6 @@ void end_frame() noexcept {
           xrPass.Draw(3);
         }
         xrPass.End();
-
-        // Restore identity uniforms so the desktop blit below is unaffected.
-        webgpu::update_copy_uniforms(0.0f, 0.0f, 1.0f, 1.0f);
 
         openxr::copy_to_shared(encoder);
       }
