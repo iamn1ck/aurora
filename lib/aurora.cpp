@@ -288,8 +288,14 @@ void end_frame() noexcept {
           if (openxr::get_eye_info(eye, ei)) {
             const float fovWidth = ei.tanLeft + ei.tanRight;
             if (fovWidth > 0.0f) {
-              const float stereo_mult = 1.0f; // Debug: adjust this to increase/decrease depth effect
-              eyeOffsets[eye] = (-ei.poseX / fovWidth) * stereo_mult;
+              // ei.poseX is +IPD/2 for the right eye and -IPD/2 for the left eye.
+              // To converge the flat game plane at a comfortable distance (e.g. 2 meters),
+              // we must shift the right eye's image to the LEFT on the screen (which means
+              // sampling the source UV to the RIGHT, so positive offset).
+              // Using positive ei.poseX gives a positive offset for the right eye.
+              const float virtual_distance = 2.0f; // meters
+              const float angular_shift = std::atan(ei.poseX / virtual_distance);
+              eyeOffsets[eye] = angular_shift / fovWidth;
             }
           }
         }

@@ -487,6 +487,7 @@ void end_frame() {
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     layer.space = g_xrSpace;
     std::vector<XrCompositionLayerProjectionView> projViews(2, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW});
+
     for (int i = 0; i < 2; i++) {
         projViews[i].pose = views[i].pose;
         projViews[i].fov  = views[i].fov;
