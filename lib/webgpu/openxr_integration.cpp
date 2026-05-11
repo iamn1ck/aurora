@@ -19,8 +19,9 @@
 #include <stdexcept>
 #include <cstring>
 #include <cmath>
+#ifndef _WIN32
 #include <unistd.h>
-
+#endif
 #define XR_CHECK(cmd) \
     do { \
         XrResult res = (cmd); \
