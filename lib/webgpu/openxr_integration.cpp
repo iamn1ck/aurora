@@ -2,6 +2,12 @@
 #include "gpu.hpp"
 
 #define XR_USE_GRAPHICS_API_VULKAN
+#ifdef __ANDROID__
+#define XR_USE_PLATFORM_ANDROID
+#include <jni.h>
+#include <SDL3/SDL_system.h>
+#endif
+
 #include <vulkan/vulkan.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
@@ -218,6 +224,21 @@ namespace {
 
 bool initialize() {
     try {
+#ifdef __ANDROID__
+        PFN_xrInitializeLoaderKHR xrInitializeLoaderKHR = nullptr;
+        xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR", (PFN_xrVoidFunction*)&xrInitializeLoaderKHR);
+        if (xrInitializeLoaderKHR) {
+            JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+            JavaVM* vm = nullptr;
+            env->GetJavaVM(&vm);
+            
+            XrLoaderInitInfoAndroidKHR loaderInfo{XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR};
+            loaderInfo.applicationVM = vm;
+            loaderInfo.applicationContext = SDL_GetAndroidActivity();
+            XR_CHECK(xrInitializeLoaderKHR((const XrLoaderInitInfoBaseHeaderKHR*)&loaderInfo));
+        }
+#endif
+
         const char* exts[] = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME };
 
         XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
