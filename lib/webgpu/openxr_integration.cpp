@@ -105,6 +105,9 @@ namespace {
     XrAction    g_xrHandPoseAction = XR_NULL_HANDLE;
     XrPath      g_handPaths[2] = {XR_NULL_PATH, XR_NULL_PATH};
     XrSpace     g_handSpaces[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    XrAction    g_xrPalmPoseAction = XR_NULL_HANDLE;
+    XrSpace     g_palmSpaces[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    bool        g_palmPoseSupported = false;
 
     bool create_vulkan_instance() {
         PFN_xrGetVulkanGraphicsRequirements2KHR pfnGetReqs = nullptr;
@@ -268,14 +271,27 @@ bool initialize() {
         }
 #endif
 
-        const char* exts[] = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME };
+        std::vector<const char*> exts = { XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME };
+
+        uint32_t extCount = 0;
+        xrEnumerateInstanceExtensionProperties(nullptr, 0, &extCount, nullptr);
+        std::vector<XrExtensionProperties> extProps(extCount, {XR_TYPE_EXTENSION_PROPERTIES});
+        xrEnumerateInstanceExtensionProperties(nullptr, extCount, &extCount, extProps.data());
+
+        for (const auto& prop : extProps) {
+            if (strcmp(prop.extensionName, XR_EXT_PALM_POSE_EXTENSION_NAME) == 0) {
+                exts.push_back(XR_EXT_PALM_POSE_EXTENSION_NAME);
+                g_palmPoseSupported = true;
+                break;
+            }
+        }
 
         XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
         ci.applicationInfo.applicationName[0] = 'A';
         ci.applicationInfo.applicationName[1] = '\0';
         ci.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
-        ci.enabledExtensionCount = 1;
-        ci.enabledExtensionNames = exts;
+        ci.enabledExtensionCount = (uint32_t)exts.size();
+        ci.enabledExtensionNames = exts.data();
         XR_CHECK(xrCreateInstance(&ci, &g_xrInstance));
 
         XrSystemGetInfo sysInfo{XR_TYPE_SYSTEM_GET_INFO};
@@ -319,6 +335,12 @@ bool initialize() {
         actionInfo.subactionPaths = g_handPaths;
         XR_CHECK(xrCreateAction(g_xrActionSet, &actionInfo, &g_xrHandPoseAction));
 
+        if (g_palmPoseSupported) {
+            strcpy(actionInfo.actionName, "palm_pose");
+            strcpy(actionInfo.localizedActionName, "Palm Pose");
+            XR_CHECK(xrCreateAction(g_xrActionSet, &actionInfo, &g_xrPalmPoseAction));
+        }
+
         // Suggest bindings for KHR simple controller
         XrPath interactionProfilePath;
         xrStringToPath(g_xrInstance, "/interaction_profiles/khr/simple_controller", &interactionProfilePath);
@@ -327,16 +349,45 @@ bool initialize() {
         xrStringToPath(g_xrInstance, "/user/hand/left/input/grip/pose", &leftGripPosePath);
         xrStringToPath(g_xrInstance, "/user/hand/right/input/grip/pose", &rightGripPosePath);
 
-        std::vector<XrActionSuggestedBinding> bindings = {
+        std::vector<XrActionSuggestedBinding> simpleBindings = {
             {g_xrHandPoseAction, leftGripPosePath},
             {g_xrHandPoseAction, rightGripPosePath}
         };
 
         XrInteractionProfileSuggestedBinding suggestedBindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         suggestedBindings.interactionProfile = interactionProfilePath;
-        suggestedBindings.suggestedBindings = bindings.data();
-        suggestedBindings.countSuggestedBindings = (uint32_t)bindings.size();
+        suggestedBindings.suggestedBindings = simpleBindings.data();
+        suggestedBindings.countSuggestedBindings = (uint32_t)simpleBindings.size();
         XR_CHECK(xrSuggestInteractionProfileBindings(g_xrInstance, &suggestedBindings));
+
+        if (g_palmPoseSupported) {
+            // Suggest bindings for Oculus Touch controller (supports palm pose)
+            XrPath oculusProfilePath;
+            xrStringToPath(g_xrInstance, "/interaction_profiles/oculus/touch_controller", &oculusProfilePath);
+
+            XrPath leftPalmPosePath, rightPalmPosePath;
+            xrStringToPath(g_xrInstance, "/user/hand/left/input/palm/pose", &leftPalmPosePath);
+            xrStringToPath(g_xrInstance, "/user/hand/right/input/palm/pose", &rightPalmPosePath);
+
+            std::vector<XrActionSuggestedBinding> oculusBindings = {
+                {g_xrHandPoseAction, leftGripPosePath},
+                {g_xrHandPoseAction, rightGripPosePath},
+                {g_xrPalmPoseAction, leftPalmPosePath},
+                {g_xrPalmPoseAction, rightPalmPosePath}
+            };
+
+            XrInteractionProfileSuggestedBinding oculusSuggestedBindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+            oculusSuggestedBindings.interactionProfile = oculusProfilePath;
+            oculusSuggestedBindings.suggestedBindings = oculusBindings.data();
+            oculusSuggestedBindings.countSuggestedBindings = (uint32_t)oculusBindings.size();
+            xrSuggestInteractionProfileBindings(g_xrInstance, &oculusSuggestedBindings);
+
+            // Also try Index controller
+            XrPath indexProfilePath;
+            xrStringToPath(g_xrInstance, "/interaction_profiles/valve/index_controller", &indexProfilePath);
+            oculusSuggestedBindings.interactionProfile = indexProfilePath;
+            xrSuggestInteractionProfileBindings(g_xrInstance, &oculusSuggestedBindings);
+        }
 
         XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
         attachInfo.countActionSets = 1;
@@ -349,6 +400,11 @@ bool initialize() {
             spaceInfo.subactionPath = g_handPaths[i];
             spaceInfo.poseInActionSpace.orientation.w = 1.0f;
             XR_CHECK(xrCreateActionSpace(g_xrSession, &spaceInfo, &g_handSpaces[i]));
+
+            if (g_palmPoseSupported) {
+                spaceInfo.action = g_xrPalmPoseAction;
+                XR_CHECK(xrCreateActionSpace(g_xrSession, &spaceInfo, &g_palmSpaces[i]));
+            }
         }
 
          uint32_t vcc = 0;
@@ -428,7 +484,10 @@ void shutdown() {
     if (g_xrMenuSwapchain) { xrDestroySwapchain(g_xrMenuSwapchain); g_xrMenuSwapchain = XR_NULL_HANDLE; }
     if (g_handSpaces[0])  { xrDestroySpace(g_handSpaces[0]); g_handSpaces[0] = XR_NULL_HANDLE; }
     if (g_handSpaces[1])  { xrDestroySpace(g_handSpaces[1]); g_handSpaces[1] = XR_NULL_HANDLE; }
+    if (g_palmSpaces[0])  { xrDestroySpace(g_palmSpaces[0]); g_palmSpaces[0] = XR_NULL_HANDLE; }
+    if (g_palmSpaces[1])  { xrDestroySpace(g_palmSpaces[1]); g_palmSpaces[1] = XR_NULL_HANDLE; }
     if (g_xrHandPoseAction) { xrDestroyAction(g_xrHandPoseAction); g_xrHandPoseAction = XR_NULL_HANDLE; }
+    if (g_xrPalmPoseAction) { xrDestroyAction(g_xrPalmPoseAction); g_xrPalmPoseAction = XR_NULL_HANDLE; }
     if (g_xrActionSet)      { xrDestroyActionSet(g_xrActionSet); g_xrActionSet = XR_NULL_HANDLE; }
     if (g_xrSpace)        { xrDestroySpace(g_xrSpace); g_xrSpace = XR_NULL_HANDLE; }
     if (g_vkCommandPool)  { vkDestroyCommandPool(g_vkDevice, g_vkCommandPool, nullptr); g_vkCommandPool = VK_NULL_HANDLE; }
@@ -732,10 +791,25 @@ void end_frame() {
         menuLayer.subImage.imageRect.extent = {(int32_t)g_menuWidth, (int32_t)g_menuHeight};
         
         // Position the menu quad on the player's left hand.
+        // We check for the palm pose first if supported, then fall back to the hand (grip) pose.
+        XrSpaceLocation palmLocation{XR_TYPE_SPACE_LOCATION};
+        bool palmValid = false;
+        if (g_palmPoseSupported && g_palmSpaces[0] != XR_NULL_HANDLE) {
+            xrLocateSpace(g_palmSpaces[0], g_xrSpace, frameState.predictedDisplayTime, &palmLocation);
+            if (palmLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
+                palmValid = true;
+            }
+        }
+
         XrSpaceLocation handLocation{XR_TYPE_SPACE_LOCATION};
         xrLocateSpace(g_handSpaces[0], g_xrSpace, frameState.predictedDisplayTime, &handLocation);
 
-        if (handLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
+        if (palmValid) {
+            menuLayer.pose = palmLocation.pose;
+            if (!(palmLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+                menuLayer.pose.orientation = {0, 0, 0, 1};
+            }
+        } else if (handLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
             menuLayer.pose = handLocation.pose;
             
             // If the orientation is also valid, we can use it.
