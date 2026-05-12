@@ -251,6 +251,7 @@ namespace {
 }
 
 bool initialize() {
+    if (is_initialized()) return true;
     try {
 #ifdef __ANDROID__
         PFN_xrInitializeLoaderKHR xrInitializeLoaderKHR = nullptr;
@@ -441,7 +442,10 @@ void shutdown() {
 bool begin_frame() {
     if (!g_xrSession) return false;
 
-    XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
+    XrEventDataBuffer ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = XR_TYPE_EVENT_DATA_BUFFER;
+
     while (xrPollEvent(g_xrInstance, &ev) == XR_SUCCESS) {
         if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             auto* sc = (XrEventDataSessionStateChanged*)&ev;
@@ -453,8 +457,14 @@ bool begin_frame() {
             } else if (sc->state == XR_SESSION_STATE_STOPPING) {
                 g_sessionRunning = false;
                 xrEndSession(g_xrSession);
+            } else if (sc->state == XR_SESSION_STATE_EXITING || sc->state == XR_SESSION_STATE_LOSS_PENDING) {
+                g_sessionRunning = false;
+                // We don't destroy the session here as it might be needed for cleanup,
+                // but we mark it as not running.
             }
         }
+        
+        memset(&ev, 0, sizeof(ev));
         ev.type = XR_TYPE_EVENT_DATA_BUFFER;
     }
 
