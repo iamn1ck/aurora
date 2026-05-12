@@ -105,9 +105,12 @@ namespace {
     XrAction    g_xrHandPoseAction = XR_NULL_HANDLE;
     XrPath      g_handPaths[2] = {XR_NULL_PATH, XR_NULL_PATH};
     XrSpace     g_handSpaces[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
-    XrAction    g_xrPalmPoseAction = XR_NULL_HANDLE;
-    XrSpace     g_palmSpaces[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
-    bool        g_palmPoseSupported = false;
+    XrHandTrackerEXT g_handTrackers[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    bool        g_handTrackingSupported = false;
+
+    PFN_xrCreateHandTrackerEXT xrCreateHandTrackerEXT = nullptr;
+    PFN_xrDestroyHandTrackerEXT xrDestroyHandTrackerEXT = nullptr;
+    PFN_xrLocateHandJointsEXT xrLocateHandJointsEXT = nullptr;
 
     bool create_vulkan_instance() {
         PFN_xrGetVulkanGraphicsRequirements2KHR pfnGetReqs = nullptr;
@@ -279,9 +282,9 @@ bool initialize() {
         xrEnumerateInstanceExtensionProperties(nullptr, extCount, &extCount, extProps.data());
 
         for (const auto& prop : extProps) {
-            if (strcmp(prop.extensionName, XR_EXT_PALM_POSE_EXTENSION_NAME) == 0) {
-                exts.push_back(XR_EXT_PALM_POSE_EXTENSION_NAME);
-                g_palmPoseSupported = true;
+            if (strcmp(prop.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME) == 0) {
+                exts.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+                g_handTrackingSupported = true;
                 break;
             }
         }
@@ -293,6 +296,12 @@ bool initialize() {
         ci.enabledExtensionCount = (uint32_t)exts.size();
         ci.enabledExtensionNames = exts.data();
         XR_CHECK(xrCreateInstance(&ci, &g_xrInstance));
+
+        if (g_handTrackingSupported) {
+            xrGetInstanceProcAddr(g_xrInstance, "xrCreateHandTrackerEXT", (PFN_xrVoidFunction*)(&xrCreateHandTrackerEXT));
+            xrGetInstanceProcAddr(g_xrInstance, "xrDestroyHandTrackerEXT", (PFN_xrVoidFunction*)(&xrDestroyHandTrackerEXT));
+            xrGetInstanceProcAddr(g_xrInstance, "xrLocateHandJointsEXT", (PFN_xrVoidFunction*)(&xrLocateHandJointsEXT));
+        }
 
         XrSystemGetInfo sysInfo{XR_TYPE_SYSTEM_GET_INFO};
         sysInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
@@ -312,6 +321,15 @@ bool initialize() {
         sessCI.next = &binding;
         sessCI.systemId = g_xrSystemId;
         XR_CHECK(xrCreateSession(g_xrInstance, &sessCI, &g_xrSession));
+
+        if (g_handTrackingSupported && xrCreateHandTrackerEXT) {
+            for (int i = 0; i < 2; i++) {
+                XrHandTrackerCreateInfoEXT createInfo{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+                createInfo.hand = (i == 0) ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+                createInfo.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+                XR_CHECK(xrCreateHandTrackerEXT(g_xrSession, &createInfo, &g_handTrackers[i]));
+            }
+        }
 
         XrReferenceSpaceCreateInfo spCI{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
         spCI.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
@@ -335,12 +353,6 @@ bool initialize() {
         actionInfo.subactionPaths = g_handPaths;
         XR_CHECK(xrCreateAction(g_xrActionSet, &actionInfo, &g_xrHandPoseAction));
 
-        if (g_palmPoseSupported) {
-            strcpy(actionInfo.actionName, "palm_pose");
-            strcpy(actionInfo.localizedActionName, "Palm Pose");
-            XR_CHECK(xrCreateAction(g_xrActionSet, &actionInfo, &g_xrPalmPoseAction));
-        }
-
         // Suggest bindings for KHR simple controller
         XrPath interactionProfilePath;
         xrStringToPath(g_xrInstance, "/interaction_profiles/khr/simple_controller", &interactionProfilePath);
@@ -360,35 +372,6 @@ bool initialize() {
         suggestedBindings.countSuggestedBindings = (uint32_t)simpleBindings.size();
         XR_CHECK(xrSuggestInteractionProfileBindings(g_xrInstance, &suggestedBindings));
 
-        if (g_palmPoseSupported) {
-            // Suggest bindings for Oculus Touch controller (supports palm pose)
-            XrPath oculusProfilePath;
-            xrStringToPath(g_xrInstance, "/interaction_profiles/oculus/touch_controller", &oculusProfilePath);
-
-            XrPath leftPalmPosePath, rightPalmPosePath;
-            xrStringToPath(g_xrInstance, "/user/hand/left/input/palm/pose", &leftPalmPosePath);
-            xrStringToPath(g_xrInstance, "/user/hand/right/input/palm/pose", &rightPalmPosePath);
-
-            std::vector<XrActionSuggestedBinding> oculusBindings = {
-                {g_xrHandPoseAction, leftGripPosePath},
-                {g_xrHandPoseAction, rightGripPosePath},
-                {g_xrPalmPoseAction, leftPalmPosePath},
-                {g_xrPalmPoseAction, rightPalmPosePath}
-            };
-
-            XrInteractionProfileSuggestedBinding oculusSuggestedBindings{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-            oculusSuggestedBindings.interactionProfile = oculusProfilePath;
-            oculusSuggestedBindings.suggestedBindings = oculusBindings.data();
-            oculusSuggestedBindings.countSuggestedBindings = (uint32_t)oculusBindings.size();
-            xrSuggestInteractionProfileBindings(g_xrInstance, &oculusSuggestedBindings);
-
-            // Also try Index controller
-            XrPath indexProfilePath;
-            xrStringToPath(g_xrInstance, "/interaction_profiles/valve/index_controller", &indexProfilePath);
-            oculusSuggestedBindings.interactionProfile = indexProfilePath;
-            xrSuggestInteractionProfileBindings(g_xrInstance, &oculusSuggestedBindings);
-        }
-
         XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
         attachInfo.countActionSets = 1;
         attachInfo.actionSets = &g_xrActionSet;
@@ -400,11 +383,6 @@ bool initialize() {
             spaceInfo.subactionPath = g_handPaths[i];
             spaceInfo.poseInActionSpace.orientation.w = 1.0f;
             XR_CHECK(xrCreateActionSpace(g_xrSession, &spaceInfo, &g_handSpaces[i]));
-
-            if (g_palmPoseSupported) {
-                spaceInfo.action = g_xrPalmPoseAction;
-                XR_CHECK(xrCreateActionSpace(g_xrSession, &spaceInfo, &g_palmSpaces[i]));
-            }
         }
 
          uint32_t vcc = 0;
@@ -484,10 +462,11 @@ void shutdown() {
     if (g_xrMenuSwapchain) { xrDestroySwapchain(g_xrMenuSwapchain); g_xrMenuSwapchain = XR_NULL_HANDLE; }
     if (g_handSpaces[0])  { xrDestroySpace(g_handSpaces[0]); g_handSpaces[0] = XR_NULL_HANDLE; }
     if (g_handSpaces[1])  { xrDestroySpace(g_handSpaces[1]); g_handSpaces[1] = XR_NULL_HANDLE; }
-    if (g_palmSpaces[0])  { xrDestroySpace(g_palmSpaces[0]); g_palmSpaces[0] = XR_NULL_HANDLE; }
-    if (g_palmSpaces[1])  { xrDestroySpace(g_palmSpaces[1]); g_palmSpaces[1] = XR_NULL_HANDLE; }
+    if (g_handTrackingSupported && xrDestroyHandTrackerEXT) {
+        if (g_handTrackers[0]) { xrDestroyHandTrackerEXT(g_handTrackers[0]); g_handTrackers[0] = XR_NULL_HANDLE; }
+        if (g_handTrackers[1]) { xrDestroyHandTrackerEXT(g_handTrackers[1]); g_handTrackers[1] = XR_NULL_HANDLE; }
+    }
     if (g_xrHandPoseAction) { xrDestroyAction(g_xrHandPoseAction); g_xrHandPoseAction = XR_NULL_HANDLE; }
-    if (g_xrPalmPoseAction) { xrDestroyAction(g_xrPalmPoseAction); g_xrPalmPoseAction = XR_NULL_HANDLE; }
     if (g_xrActionSet)      { xrDestroyActionSet(g_xrActionSet); g_xrActionSet = XR_NULL_HANDLE; }
     if (g_xrSpace)        { xrDestroySpace(g_xrSpace); g_xrSpace = XR_NULL_HANDLE; }
     if (g_vkCommandPool)  { vkDestroyCommandPool(g_vkDevice, g_vkCommandPool, nullptr); g_vkCommandPool = VK_NULL_HANDLE; }
@@ -791,13 +770,24 @@ void end_frame() {
         menuLayer.subImage.imageRect.extent = {(int32_t)g_menuWidth, (int32_t)g_menuHeight};
         
         // Position the menu quad on the player's left hand.
-        // We check for the palm pose first if supported, then fall back to the hand (grip) pose.
-        XrSpaceLocation palmLocation{XR_TYPE_SPACE_LOCATION};
+        // We check for the palm joint first if supported, then fall back to the hand (grip) pose.
+        XrPosef palmPose;
         bool palmValid = false;
-        if (g_palmPoseSupported && g_palmSpaces[0] != XR_NULL_HANDLE) {
-            xrLocateSpace(g_palmSpaces[0], g_xrSpace, frameState.predictedDisplayTime, &palmLocation);
-            if (palmLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
-                palmValid = true;
+        if (g_handTrackingSupported && g_handTrackers[0] != XR_NULL_HANDLE && xrLocateHandJointsEXT) {
+            XrHandJointsLocateInfoEXT locateInfo{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+            locateInfo.baseSpace = g_xrSpace;
+            locateInfo.time = frameState.predictedDisplayTime;
+            
+            XrHandJointLocationEXT jointLocations[XR_HAND_JOINT_COUNT_EXT];
+            XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+            locations.jointCount = XR_HAND_JOINT_COUNT_EXT;
+            locations.jointLocations = jointLocations;
+            
+            if (XR_SUCCEEDED(xrLocateHandJointsEXT(g_handTrackers[0], &locateInfo, &locations))) {
+                if (locations.isActive && (jointLocations[XR_HAND_JOINT_PALM_EXT].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+                    palmPose = jointLocations[XR_HAND_JOINT_PALM_EXT].pose;
+                    palmValid = true;
+                }
             }
         }
 
@@ -805,10 +795,7 @@ void end_frame() {
         xrLocateSpace(g_handSpaces[0], g_xrSpace, frameState.predictedDisplayTime, &handLocation);
 
         if (palmValid) {
-            menuLayer.pose = palmLocation.pose;
-            if (!(palmLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
-                menuLayer.pose.orientation = {0, 0, 0, 1};
-            }
+            menuLayer.pose = palmPose;
         } else if (handLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
             menuLayer.pose = handLocation.pose;
             
