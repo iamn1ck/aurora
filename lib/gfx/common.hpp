@@ -237,7 +237,7 @@ void end_offscreen();
 bool is_offscreen() noexcept;
 uint32_t get_sample_count() noexcept;
 void clear_caches() noexcept;
-void set_menu_view(wgpu::TextureView view) noexcept;
+void set_menu_targets(wgpu::Texture texture, wgpu::TextureView view) noexcept;
 void switch_to_menu_render(bool menu) noexcept;
 
 namespace tex_palette_conv {

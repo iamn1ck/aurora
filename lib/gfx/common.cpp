@@ -150,6 +150,7 @@ struct RenderPass {
 static std::vector<RenderPass> g_renderPasses;
 static u32 g_currentRenderPass = UINT32_MAX;
 static bool g_inOffscreen = false;
+static wgpu::Texture g_menuTexture;
 static wgpu::TextureView g_menuView;
 static bool g_menuCleared = false;
 static std::optional<RenderPass> g_suspendedEfbPass;
@@ -619,7 +620,8 @@ void shutdown() {
   s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
 }
 
-void set_menu_view(wgpu::TextureView view) noexcept {
+void set_menu_targets(wgpu::Texture texture, wgpu::TextureView view) noexcept {
+  g_menuTexture = texture;
   g_menuView = view;
 }
 
@@ -637,6 +639,8 @@ void switch_to_menu_render(bool menu) noexcept {
     newPass.colorView = g_menuView;
     newPass.resolveView = nullptr;
     newPass.depthView = nullptr; // UI usually doesn't need depth
+    newPass.copySourceTexture = g_menuTexture;
+    newPass.copySourceView = g_menuView;
     newPass.targetSize = {1920, 1080, 1}; // Standard menu size
     newPass.msaaSamples = 1;
     newPass.clearColor = !g_menuCleared;

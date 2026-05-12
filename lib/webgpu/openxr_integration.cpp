@@ -868,6 +868,10 @@ wgpu::TextureView get_menu_texture_view() {
     return nullptr;
 }
 
+wgpu::Texture get_menu_texture() {
+    return g_dawnMenuRenderTexture;
+}
+
 uint32_t get_width()  { return g_swapchainWidth; }  // full side-by-side width
 uint32_t get_height() { return g_swapchainHeight; }
 uint32_t get_eye_width() { return g_eyeWidth; }       // per-eye half-width

@@ -251,7 +251,7 @@ void end_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   if (openxr::is_initialized()) {
-    gfx::set_menu_view(openxr::get_menu_texture_view());
+    gfx::set_menu_targets(openxr::get_menu_texture(), openxr::get_menu_texture_view());
   }
   gx::fifo::drain();
   const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
