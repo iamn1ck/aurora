@@ -826,8 +826,8 @@ void end_frame() {
         }
 
         // Size in meters
-        menuLayer.size.width = 1.0f; // Reduced size from 2.0m to 1.0m for hand-held
-        menuLayer.size.height = 1.0f * (float)g_menuHeight / (float)g_menuWidth;
+        menuLayer.size.width = 0.5f; // Reduced size from 1.0m to 0.5m for hand-held
+        menuLayer.size.height = 0.5f * (float)g_menuHeight / (float)g_menuWidth;
         menuLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
     }
 
