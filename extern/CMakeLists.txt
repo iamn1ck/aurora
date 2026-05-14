@@ -285,3 +285,23 @@ if (NOT TARGET TracyClient)
     message(FATAL_ERROR "Failed to make TracyClient available")
   endif ()
 endif ()
+
+if (AURORA_ENABLE_XR)
+  if (NOT TARGET openxr_loader)
+    message(STATUS "aurora: Fetching OpenXR-SDK")
+    FetchContent_Declare(openxr
+      URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-${AURORA_OPENXR_VERSION}.tar.gz
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+      EXCLUDE_FROM_ALL
+    )
+    set(BUILD_LOADER ON CACHE BOOL "" FORCE)
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+    set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+    set(OPENXR_INSTALL OFF CACHE BOOL "" FORCE)
+    set(BUILD_WITH_SYSTEM_JSONCPP OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(openxr)
+  else ()
+    message(STATUS "aurora: Using existing OpenXR-SDK")
+  endif ()
+endif ()

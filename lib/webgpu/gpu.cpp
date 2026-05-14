@@ -18,6 +18,14 @@
 #ifdef WEBGPU_DAWN
 #include "../dawn/BackendBinding.hpp"
 #include <dawn/native/DawnNative.h>
+#include <dawn/native/VulkanBackend.h>
+#endif
+#include "../xr.hpp"
+
+#ifdef WEBGPU_DAWN
+namespace dawn::native::vulkan {
+VkDevice GetVkDevice(WGPUDevice device);
+} // namespace dawn::native::vulkan
 #endif
 
 namespace aurora::gx {
@@ -413,6 +421,13 @@ bool initialize(AuroraBackend auroraBackend) {
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
+
+    wgpu::RequestAdapterWebXROptions webXROptions;
+    if (g_config.enableXR) {
+        webXROptions.xrCompatible = true;
+        webXROptions.nextInChain = instanceDescriptor.nextInChain;
+        instanceDescriptor.nextInChain = &webXROptions;
+    }
 #endif
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
     if (!g_instance) {
@@ -526,7 +541,6 @@ bool initialize(AuroraBackend auroraBackend) {
         .storeDataFunction = store_to_cache,
         .functionUserdata = nullptr,
     });
-
     constexpr std::array enableToggles{
     /* clang-format off */
 #if _WIN32
@@ -604,6 +618,48 @@ bool initialize(AuroraBackend auroraBackend) {
       }
       Log.report(level, "WebGPU message: {}", message);
     });
+
+
+    if (g_config.enableXR && g_backendType == wgpu::BackendType::Vulkan) {
+      VkInstance vkInstance = dawn::native::vulkan::GetInstance(g_device.Get());
+      VkDevice vkDevice = dawn::native::vulkan::GetVkDevice(g_device.Get());
+      VkPhysicalDevice vkPhysicalDevice = VK_NULL_HANDLE;
+
+      // Match physical device by vendor/device ID from adapter info
+      uint32_t deviceCount = 0;
+      vkEnumeratePhysicalDevices(vkInstance, &deviceCount, nullptr);
+      std::vector<VkPhysicalDevice> devices(deviceCount);
+      vkEnumeratePhysicalDevices(vkInstance, &deviceCount, devices.data());
+
+      for (auto dev : devices) {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(dev, &props);
+        if (props.vendorID == g_adapterInfo.vendorID && props.deviceID == g_adapterInfo.deviceID) {
+          vkPhysicalDevice = dev;
+          break;
+        }
+      }
+
+      // Find graphics queue family
+      uint32_t queueFamilyCount = 0;
+      vkGetPhysicalDeviceQueueFamilyProperties(vkPhysicalDevice, &queueFamilyCount, nullptr);
+      std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+      vkGetPhysicalDeviceQueueFamilyProperties(vkPhysicalDevice, &queueFamilyCount, queueFamilies.data());
+
+      uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
+      for (uint32_t i = 0; i < queueFamilyCount; ++i) {
+        if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+          graphicsQueueFamilyIndex = i;
+          break;
+        }
+      }
+
+      if (vkInstance != VK_NULL_HANDLE && vkDevice != VK_NULL_HANDLE && vkPhysicalDevice != VK_NULL_HANDLE && graphicsQueueFamilyIndex != UINT32_MAX) {
+        xr::initialize_session(vkInstance, vkPhysicalDevice, vkDevice, graphicsQueueFamilyIndex, 0);
+      } else {
+        Log.error("Failed to extract Vulkan handles for OpenXR");
+      }
+    }
   }
   g_queue = g_device.GetQueue();
 

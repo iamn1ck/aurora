@@ -15,6 +15,7 @@
 #include "input.hpp"
 #include "internal.hpp"
 #include "window.hpp"
+#include "xr.hpp"
 
 #include <SDL3/SDL_filesystem.h>
 #include <magic_enum.hpp>
@@ -94,6 +95,10 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
   if (g_config.maxTextureAnisotropy == 0) {
     g_config.maxTextureAnisotropy = 16;
+  }
+  g_config.enableXR = true;
+  if (g_config.enableXR) {
+    xr::initialize_instance();
   }
   ASSERT(window::initialize(), "Error initializing window");
 
@@ -186,6 +191,7 @@ void shutdown() noexcept {
   webgpu::shutdown();
 #endif
   input::shutdown();
+  xr::shutdown();
   window::shutdown();
 }
 
