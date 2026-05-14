@@ -28,6 +28,8 @@ endif ()
 if (AURORA_ENABLE_GX)
     target_sources(aurora_core PRIVATE lib/imgui.cpp)
     target_link_libraries(aurora_core PUBLIC imgui)
+    target_sources(aurora_core PRIVATE lib/webgpu/openxr_integration.cpp)
+    target_link_libraries(aurora_core PRIVATE OpenXR::openxr_loader Vulkan::Vulkan)
 endif ()
 
 if(AURORA_ENABLE_RMLUI)

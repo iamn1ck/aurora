@@ -38,7 +38,19 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
   aurora::window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
 }
 
+#include "../../webgpu/openxr_integration.hpp"
+
 void AuroraGetRenderSize(u32* width, u32* height) {
+  if (aurora::openxr::is_initialized()) {
+    if (width != nullptr) {
+      *width = aurora::openxr::get_eye_width();
+    }
+    if (height != nullptr) {
+      *height = aurora::openxr::get_height();
+    }
+    return;
+  }
+
   const auto windowSize = aurora::window::get_window_size();
   if (width != nullptr) {
     *width = windowSize.fb_width;

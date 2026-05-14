@@ -51,6 +51,17 @@ extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
 extern wgpu::Instance g_instance;
 
+extern wgpu::Buffer g_CopyUniformBuffer;
+extern wgpu::BindGroup g_xrEyeBindGroups[2]; // per-eye stereo blit bind groups
+
+// Write per-eye UV offsets into the two eye-specific uniform buffers.
+// Call this BEFORE the XR stereo render pass (each eye has its own buffer so
+// writes are independent and do not overwrite each other at submit time).
+void prepare_xr_stereo_uniforms(float leftOffsetX, float leftOffsetY, float rightOffsetX, float rightOffsetY);
+
+// Update the default copy uniform (used for the desktop blit). Identity by default.
+void update_copy_uniforms(float uvOffsetX, float uvOffsetY, float uvScaleX, float uvScaleY);
+
 bool initialize(AuroraBackend backend);
 void shutdown();
 void release_surface() noexcept;

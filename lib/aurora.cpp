@@ -5,6 +5,7 @@
 #include "gx/fifo.hpp"
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
+#include "webgpu/openxr_integration.hpp"
 #include <webgpu/webgpu_cpp.h>
 #endif
 
@@ -243,6 +244,8 @@ bool begin_frame() noexcept {
     }
   }
 
+  openxr::begin_frame();
+
   imgui::new_frame(window::get_window_size());
   if (!gfx::begin_frame()) {
     g_currentView = {};
@@ -262,22 +265,96 @@ void end_frame() noexcept {
   auto encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
   gfx::end_frame(encoder);
   gfx::render(encoder);
+    const auto& presentSource = webgpu::present_source();
+    auto desktopViewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
+                                                       webgpu::g_graphicsConfig.surfaceConfiguration.height,
+                                                       presentSource.size.width, presentSource.size.height);
+    wgpu::BindGroup presentBindGroup = webgpu::g_CopyBindGroup;
+  #if AURORA_ENABLE_RMLUI
+    if (rmlui::is_initialized()) {
+      const auto rmlOutput = rmlui::render(encoder, desktopViewport);
+      if (rmlOutput.texture != nullptr) {
+        presentBindGroup = rmlOutput.copyBindGroup;
+      }
+    }
+  #endif
+
+    if (openxr::is_initialized()) {
+      wgpu::TextureView xrView = openxr::get_texture_view();
+      if (xrView) {
+        const float eyeW = static_cast<float>(openxr::get_eye_width());
+        const float eyeH = static_cast<float>(openxr::get_height());
+
+        // Compute per-eye UV offsets from the XR-reported IPD.
+        // poseX is the eye's X offset from the head centre in metres.
+        // Dividing by the total horizontal FOV extent (in tangent space) gives
+        // the fraction of the screen width to shift.  Negate so a left eye
+        // (negative poseX) shifts the sampled UV region to the right.
+        float eyeOffsetsX[2] = {0.0f, 0.0f};
+        float eyeOffsetsY[2] = {0.0f, 0.0f};
+        for (int eye = 0; eye < 2; ++eye) {
+          openxr::XrEyeInfo ei{};
+          if (openxr::get_eye_info(eye, ei)) {
+            const float fovWidth = ei.tanLeft + ei.tanRight;
+            if (fovWidth > 0.0f) {
+              // Headsets often have asymmetric FOVs (larger outwards than inwards).
+              // Straight ahead is at u = tanLeft / fovWidth.
+              // We want this u to map to game_u = 0.5. So offset = 0.5 - u.
+              const float center_offsetX = 0.5f - (ei.tanLeft / fovWidth);
+
+              // Add the convergence shift to bring the virtual screen to 2.0 meters.
+              const float virtual_distance = 2.0f; // meters
+              const float convergence_shift = (ei.poseX / virtual_distance) / fovWidth;
+              
+              eyeOffsetsX[eye] = center_offsetX + convergence_shift;
+            }
+
+            const float fovHeight = ei.tanUp + ei.tanDown;
+            if (fovHeight > 0.0f) {
+              // Vertical straight ahead is at v = tanUp / fovHeight.
+              // We want this v to map to game_v = 0.5. So offset = 0.5 - v.
+              eyeOffsetsY[eye] = 0.5f - (ei.tanUp / fovHeight);
+            }
+          }
+        }
+
+        // Write BOTH eye uniforms to their respective buffers BEFORE the render
+        // pass begins.
+        webgpu::prepare_xr_stereo_uniforms(eyeOffsetsX[0], eyeOffsetsY[0], eyeOffsetsX[1], eyeOffsetsY[1]);
+
+        const std::array xrAttachments{
+            wgpu::RenderPassColorAttachment{
+                .view = xrView,
+                .loadOp = wgpu::LoadOp::Clear,
+                .storeOp = wgpu::StoreOp::Store,
+            },
+        };
+        const wgpu::RenderPassDescriptor xrPassDesc{
+            .label = "VR EFB stereo blit",
+            .colorAttachmentCount = xrAttachments.size(),
+            .colorAttachments = xrAttachments.data(),
+        };
+        const auto xrPass = encoder.BeginRenderPass(&xrPassDesc);
+        xrPass.SetPipeline(webgpu::g_CopyPipeline);
+
+        for (int eye = 0; eye < 2; ++eye) {
+          // Switch to the per-eye bind group (different uniform buffer per eye).
+          xrPass.SetBindGroup(0, webgpu::g_xrEyeBindGroups[eye], 0, nullptr);
+          xrPass.SetViewport(
+              static_cast<float>(eye) * eyeW, 0.0f,
+              eyeW, eyeH,
+              0.0f, 1.0f);
+          xrPass.Draw(3);
+        }
+        xrPass.End();
+
+        openxr::copy_to_shared(encoder);
+      }
+    }
+
   {
     window::SurfaceLock surfaceLock;
     if (window::is_presentable() && g_surface && g_currentView) {
-      const auto& presentSource = webgpu::present_source();
-      auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
-                                                         webgpu::g_graphicsConfig.surfaceConfiguration.height,
-                                                         presentSource.size.width, presentSource.size.height);
-      wgpu::BindGroup presentBindGroup = webgpu::g_CopyBindGroup;
-    #if AURORA_ENABLE_RMLUI
-      if (rmlui::is_initialized()) {
-        const auto rmlOutput = rmlui::render(encoder, viewport);
-        if (rmlOutput.texture != nullptr) {
-          presentBindGroup = rmlOutput.copyBindGroup;
-        }
-      }
-    #endif
       {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
@@ -295,7 +372,7 @@ void end_frame() noexcept {
         // Copy EFB -> XFB (swapchain)
         pass.SetPipeline(webgpu::g_CopyPipeline);
         pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
-        pass.SetViewport(viewport.left, viewport.top, viewport.width, viewport.height, viewport.znear, viewport.zfar);
+        pass.SetViewport(desktopViewport.left, desktopViewport.top, desktopViewport.width, desktopViewport.height, desktopViewport.znear, desktopViewport.zfar);
 
         pass.Draw(3);
         pass.End();
@@ -338,6 +415,8 @@ void end_frame() noexcept {
     }
     g_currentView = {};
   }
+  
+  openxr::end_frame();
 
   TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
   TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);
