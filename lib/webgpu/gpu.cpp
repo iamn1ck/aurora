@@ -24,7 +24,7 @@
 
 #ifdef WEBGPU_DAWN
 namespace dawn::native::vulkan {
-VkDevice GetVkDevice(WGPUDevice device);
+DAWN_NATIVE_EXPORT VkDevice GetVkDevice(WGPUDevice device);
 } // namespace dawn::native::vulkan
 #endif
 
