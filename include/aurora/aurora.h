@@ -109,6 +109,7 @@ typedef struct {
    * This can be set to 0 to disable allocating this region.
    */
   uint32_t mem2Size;
+  bool enableXR;
 } AuroraConfig;
 
 typedef struct {
