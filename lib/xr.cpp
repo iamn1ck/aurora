@@ -449,6 +449,10 @@ static void create_dawn_textures() {
 
     wgpuTex = dawn::native::vulkan::WrapVulkanImage(webgpu::g_device.Get(), &desc);
 
+#elif defined(_WIN32)
+    // --- Windows path: Vulkan external memory wrapping is not supported in Dawn ---
+    Log.error("Vulkan external image sharing is not supported on Windows");
+    return;
 #else // Linux / Desktop: OpaqueFD path
     // 1. Create external VkImage
     VkFormat viewFormats[] = { vkFmt };
