@@ -47,10 +47,18 @@ TextureWithSampler g_frameBuffer;
 TextureWithSampler g_frameBufferResolved;
 TextureWithSampler g_depthBuffer;
 
+// Forward declaration (defined after create_copy_pipeline).
+static wgpu::BindGroup create_copy_bind_group_with_uniform(const TextureWithSampler& source,
+                                                            const wgpu::Buffer& uniformBuf);
+
 // EFB -> XFB copy pipeline
 static wgpu::BindGroupLayout g_CopyBindGroupLayout;
 wgpu::RenderPipeline g_CopyPipeline;
 wgpu::BindGroup g_CopyBindGroup;
+wgpu::Buffer g_CopyUniformBuffer;
+
+wgpu::Buffer g_xrEyeUniformBuffers[2];
+wgpu::BindGroup g_xrEyeBindGroups[2];
 
 static wgpu::Adapter g_adapter;
 wgpu::Instance g_instance;
@@ -248,6 +256,13 @@ var efb_sampler: sampler;
 @group(0) @binding(1)
 var efb_texture: texture_2d<f32>;
 
+struct CopyUniforms {
+    uv_offset: vec2<f32>,
+    uv_scale:  vec2<f32>,
+};
+@group(0) @binding(2)
+var<uniform> u: CopyUniforms;
+
 struct VertexOutput {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -274,7 +289,8 @@ fn vs_main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = textureSample(efb_texture, efb_sampler, in.uv);
+    let uv = clamp(in.uv * u.uv_scale + u.uv_offset, vec2(0.0), vec2(1.0));
+    let color = textureSample(efb_texture, efb_sampler, uv);
     return vec4(color.rgb, 1.0);
 }
 )""";
@@ -311,6 +327,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                   .viewDimension = wgpu::TextureViewDimension::e2D,
               },
       },
+      wgpu::BindGroupLayoutEntry{
+          .binding = 2,
+          .visibility = wgpu::ShaderStage::Fragment,
+          .buffer =
+              wgpu::BufferBindingLayout{
+                  .type = wgpu::BufferBindingType::Uniform,
+                  .minBindingSize = sizeof(float) * 4,
+              },
+      },
   };
   const wgpu::BindGroupLayoutDescriptor bindGroupLayoutDescriptor{
       .entryCount = bindGroupLayoutEntries.size(),
@@ -341,9 +366,36 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
       .fragment = &fragmentState,
   };
   g_CopyPipeline = g_device.CreateRenderPipeline(&pipelineDescriptor);
+
+  // Create the uniform buffer (16 bytes: uvOffset.xy + uvScale.xy).
+  // Initialise to identity: offset=(0,0), scale=(1,1).
+  const float defaultUniforms[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+  const wgpu::BufferDescriptor uniformBufDesc{
+      .label = "Copy Uniform Buffer",
+      .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
+      .size = sizeof(defaultUniforms),
+  };
+  g_CopyUniformBuffer = g_device.CreateBuffer(&uniformBufDesc);
+  g_queue.WriteBuffer(g_CopyUniformBuffer, 0, defaultUniforms, sizeof(defaultUniforms));
+
+  // Also initialise per-eye uniform buffers for stereo blitting.
+  for (int i = 0; i < 2; ++i) {
+    const wgpu::BufferDescriptor eyeBufDesc{
+        .label = i == 0 ? "XR Eye0 Uniform Buffer" : "XR Eye1 Uniform Buffer",
+        .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
+        .size = sizeof(defaultUniforms),
+    };
+    g_xrEyeUniformBuffers[i] = g_device.CreateBuffer(&eyeBufDesc);
+    g_queue.WriteBuffer(g_xrEyeUniformBuffers[i], 0, defaultUniforms, sizeof(defaultUniforms));
+  }
 }
 
 wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
+  return create_copy_bind_group_with_uniform(source, g_CopyUniformBuffer);
+}
+
+static wgpu::BindGroup create_copy_bind_group_with_uniform(const TextureWithSampler& source,
+                                                            const wgpu::Buffer& uniformBuf) {
   const std::array bindGroupEntries{
       wgpu::BindGroupEntry{
           .binding = 0,
@@ -353,6 +405,11 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
           .binding = 1,
           .textureView = source.view,
       },
+      wgpu::BindGroupEntry{
+          .binding = 2,
+          .buffer = uniformBuf,
+          .size = sizeof(float) * 4,
+      },
   };
   const wgpu::BindGroupDescriptor bindGroupDescriptor{
       .layout = g_CopyBindGroupLayout,
@@ -360,6 +417,15 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
       .entries = bindGroupEntries.data(),
   };
   return g_device.CreateBindGroup(&bindGroupDescriptor);
+}
+
+void prepare_xr_stereo_uniforms(float leftOffsetX, float rightOffsetX) {
+  auto write = [&](int eye, float offsetX) {
+    const float data[4] = {offsetX, 0.0f, 1.0f, 1.0f};
+    g_queue.WriteBuffer(g_xrEyeUniformBuffers[eye], 0, data, sizeof(data));
+  };
+  write(0, leftOffsetX);
+  write(1, rightOffsetX);
 }
 
 static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
@@ -619,28 +685,28 @@ bool initialize(AuroraBackend auroraBackend) {
       VkDevice vkDevice = dawn::native::vulkan::GetVkDevice(g_device.Get());
       VkPhysicalDevice vkPhysicalDevice = xr::get_vulkan_graphics_device(vkInstance);
       if (vkPhysicalDevice == VK_NULL_HANDLE) {
-        Log.error("Failed to get Vulkan physical device from OpenXR");
-        return false;
-      }
-
-      // Find graphics queue family
-      uint32_t queueFamilyCount = 0;
-      vkGetPhysicalDeviceQueueFamilyProperties(vkPhysicalDevice, &queueFamilyCount, nullptr);
-      std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-      vkGetPhysicalDeviceQueueFamilyProperties(vkPhysicalDevice, &queueFamilyCount, queueFamilies.data());
-
-      uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
-      for (uint32_t i = 0; i < queueFamilyCount; ++i) {
-        if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-          graphicsQueueFamilyIndex = i;
-          break;
-        }
-      }
-
-      if (vkInstance != VK_NULL_HANDLE && vkDevice != VK_NULL_HANDLE && vkPhysicalDevice != VK_NULL_HANDLE && graphicsQueueFamilyIndex != UINT32_MAX) {
-        xr::initialize_session(vkInstance, vkPhysicalDevice, vkDevice, graphicsQueueFamilyIndex, 0);
+        Log.warn("Failed to get Vulkan physical device from OpenXR. Disabling XR and continuing in desktop mode.");
+        xr::shutdown();
       } else {
-        Log.error("Failed to extract Vulkan handles for OpenXR");
+        // Find graphics queue family
+        uint32_t queueFamilyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(vkPhysicalDevice, &queueFamilyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(vkPhysicalDevice, &queueFamilyCount, queueFamilies.data());
+
+        uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
+        for (uint32_t i = 0; i < queueFamilyCount; ++i) {
+          if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            graphicsQueueFamilyIndex = i;
+            break;
+          }
+        }
+
+        if (vkInstance != VK_NULL_HANDLE && vkDevice != VK_NULL_HANDLE && vkPhysicalDevice != VK_NULL_HANDLE && graphicsQueueFamilyIndex != UINT32_MAX) {
+          xr::initialize_session(vkInstance, vkPhysicalDevice, vkDevice, graphicsQueueFamilyIndex, 0);
+        } else {
+          Log.error("Failed to extract Vulkan handles for OpenXR");
+        }
       }
     }
   }
@@ -689,6 +755,11 @@ void shutdown() {
   g_CopyBindGroupLayout = {};
   g_CopyPipeline = {};
   g_CopyBindGroup = {};
+  g_CopyUniformBuffer = {};
+  for (int i = 0; i < 2; ++i) {
+    g_xrEyeBindGroups[i] = {};
+    g_xrEyeUniformBuffers[i] = {};
+  }
   g_frameBuffer = {};
   g_frameBufferResolved = {};
   g_depthBuffer = {};
@@ -759,6 +830,9 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
   g_frameBufferResolved = create_render_texture(width, height, false);
   g_depthBuffer = create_depth_texture(width, height);
   g_CopyBindGroup = create_copy_bind_group(present_source());
+  for (int i = 0; i < 2; ++i) {
+    g_xrEyeBindGroups[i] = create_copy_bind_group_with_uniform(present_source(), g_xrEyeUniformBuffers[i]);
+  }
 }
 } // namespace aurora::webgpu
 

@@ -207,6 +207,7 @@ const AuroraEvent* update() noexcept {
 bool begin_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+  xr::begin_frame();
   {
     window::SurfaceLock surfaceLock;
     if (!window::is_presentable()) {
@@ -268,6 +269,56 @@ void end_frame() noexcept {
   auto encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
   gfx::end_frame(encoder);
   gfx::render(encoder);
+
+  if (xr::is_enabled()) {
+    wgpu::TextureView xrView = xr::get_texture_view();
+    if (xrView) {
+      const float eyeW = static_cast<float>(xr::get_eye_width());
+      const float eyeH = static_cast<float>(xr::get_height());
+
+      float eyeOffsets[2] = {0.0f, 0.0f};
+      for (int eye = 0; eye < 2; ++eye) {
+        xr::XrEyeInfo ei{};
+        if (xr::get_eye_info(eye, ei)) {
+          const float fovWidth = ei.tanLeft + ei.tanRight;
+          if (fovWidth > 0.0f) {
+            const float center_offset = 0.5f - (ei.tanLeft / fovWidth);
+            const float virtual_distance = 2.0f; // meters
+            const float convergence_shift = (ei.poseX / virtual_distance) / fovWidth;
+            eyeOffsets[eye] = center_offset + convergence_shift;
+          }
+        }
+      }
+
+      webgpu::prepare_xr_stereo_uniforms(eyeOffsets[0], eyeOffsets[1]);
+
+      const std::array xrAttachments{
+          wgpu::RenderPassColorAttachment{
+              .view = xrView,
+              .loadOp = wgpu::LoadOp::Clear,
+              .storeOp = wgpu::StoreOp::Store,
+          },
+      };
+      const wgpu::RenderPassDescriptor xrPassDesc{
+          .label = "VR EFB stereo blit",
+          .colorAttachmentCount = xrAttachments.size(),
+          .colorAttachments = xrAttachments.data(),
+      };
+      const auto xrPass = encoder.BeginRenderPass(&xrPassDesc);
+      xrPass.SetPipeline(webgpu::g_CopyPipeline);
+
+      for (int eye = 0; eye < 2; ++eye) {
+        xrPass.SetBindGroup(0, webgpu::g_xrEyeBindGroups[eye], 0, nullptr);
+        xrPass.SetViewport(
+            static_cast<float>(eye) * eyeW, 0.0f,
+            eyeW, eyeH,
+            0.0f, 1.0f);
+        xrPass.Draw(3);
+      }
+      xrPass.End();
+    }
+  }
+
   {
     window::SurfaceLock surfaceLock;
     if (window::is_presentable() && g_surface && g_currentView) {
@@ -343,6 +394,9 @@ void end_frame() noexcept {
       webgpu::release_surface();
     }
     g_currentView = {};
+  }
+  if (xr::is_enabled()) {
+    xr::end_frame();
   }
 
   TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
