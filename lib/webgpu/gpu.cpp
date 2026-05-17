@@ -421,13 +421,6 @@ bool initialize(AuroraBackend auroraBackend) {
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
-
-    wgpu::RequestAdapterWebXROptions webXROptions;
-    if (g_config.enableXR) {
-        webXROptions.xrCompatible = true;
-        webXROptions.nextInChain = instanceDescriptor.nextInChain;
-        instanceDescriptor.nextInChain = &webXROptions;
-    }
 #endif
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
     if (!g_instance) {
@@ -450,6 +443,7 @@ bool initialize(AuroraBackend auroraBackend) {
   }
   {
     const wgpu::RequestAdapterOptions options{
+        .nextInChain = nullptr,
         .powerPreference = wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
         .compatibleSurface = g_surface,
@@ -620,24 +614,13 @@ bool initialize(AuroraBackend auroraBackend) {
     });
 
 
-    if (g_config.enableXR && g_backendType == wgpu::BackendType::Vulkan) {
+    if (xr::is_enabled() && g_backendType == wgpu::BackendType::Vulkan) {
       VkInstance vkInstance = dawn::native::vulkan::GetInstance(g_device.Get());
       VkDevice vkDevice = dawn::native::vulkan::GetVkDevice(g_device.Get());
-      VkPhysicalDevice vkPhysicalDevice = VK_NULL_HANDLE;
-
-      // Match physical device by vendor/device ID from adapter info
-      uint32_t deviceCount = 0;
-      vkEnumeratePhysicalDevices(vkInstance, &deviceCount, nullptr);
-      std::vector<VkPhysicalDevice> devices(deviceCount);
-      vkEnumeratePhysicalDevices(vkInstance, &deviceCount, devices.data());
-
-      for (auto dev : devices) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(dev, &props);
-        if (props.vendorID == g_adapterInfo.vendorID && props.deviceID == g_adapterInfo.deviceID) {
-          vkPhysicalDevice = dev;
-          break;
-        }
+      VkPhysicalDevice vkPhysicalDevice = xr::get_vulkan_graphics_device(vkInstance);
+      if (vkPhysicalDevice == VK_NULL_HANDLE) {
+        Log.error("Failed to get Vulkan physical device from OpenXR");
+        return false;
       }
 
       // Find graphics queue family

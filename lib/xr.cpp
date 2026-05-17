@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include <dlfcn.h>
 #include "xr.hpp"
 #include "logging.hpp"
 #include <vector>
@@ -12,28 +14,62 @@ static XrSystemId g_systemId = XR_NULL_SYSTEM_ID;
 static XrSession g_session = XR_NULL_HANDLE;
 
 bool initialize_instance() {
-    std::vector<const char*> extensions = {XR_KHR_VULKAN_ENABLE_EXTENSION_NAME};
-    
-    XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
-    strncpy(createInfo.applicationInfo.applicationName, "Aurora", XR_MAX_APPLICATION_NAME_SIZE);
+    std::vector<const char*> extensions = {
+        XR_KHR_VULKAN_ENABLE_EXTENSION_NAME
+    };
+
+    XrInstanceCreateInfo createInfo{};
+    createInfo.type = XR_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.next = nullptr;
+
+    snprintf(
+        createInfo.applicationInfo.applicationName,
+        XR_MAX_APPLICATION_NAME_SIZE,
+        "Aurora"
+    );
+
     createInfo.applicationInfo.applicationVersion = 1;
-    strncpy(createInfo.applicationInfo.engineName, "Aurora", XR_MAX_ENGINE_NAME_SIZE);
+
+    snprintf(
+        createInfo.applicationInfo.engineName,
+        XR_MAX_ENGINE_NAME_SIZE,
+        "Aurora"
+    );
+
     createInfo.applicationInfo.engineVersion = 1;
-    createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
+
+    createInfo.enabledExtensionCount =
+        static_cast<uint32_t>(extensions.size());
+
     createInfo.enabledExtensionNames = extensions.data();
 
-    XrResult result = xrCreateInstance(&createInfo, &g_instance);
+    XrResult result =
+        xrCreateInstance(&createInfo, &g_instance);
+
     if (XR_FAILED(result)) {
-        Log.error("Failed to create OpenXR instance: {}", (int)result);
+        Log.error(
+            "Failed to create OpenXR instance: {}",
+            (int)result
+        );
         return false;
     }
 
-    XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
-    systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-    result = xrGetSystem(g_instance, &systemInfo, &g_systemId);
+    XrSystemGetInfo systemInfo{};
+    systemInfo.type = XR_TYPE_SYSTEM_GET_INFO;
+    systemInfo.formFactor =
+        XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+
+    result =
+        xrGetSystem(g_instance,
+                    &systemInfo,
+                    &g_systemId);
+
     if (XR_FAILED(result)) {
-        Log.error("Failed to get OpenXR system: {}", (int)result);
+        Log.error(
+            "Failed to get OpenXR system: {}",
+            (int)result
+        );
         return false;
     }
 
@@ -107,6 +143,20 @@ VkPhysicalDevice get_vulkan_graphics_device(VkInstance instance) {
 }
 
 bool initialize_session(VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device, uint32_t queueFamilyIndex, uint32_t queueIndex) {
+    PFN_xrGetVulkanGraphicsRequirementsKHR xrGetVulkanGraphicsRequirementsKHR = nullptr;
+    xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsRequirementsKHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsRequirementsKHR);
+    if (xrGetVulkanGraphicsRequirementsKHR) {
+        XrGraphicsRequirementsVulkanKHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};
+        XrResult res = xrGetVulkanGraphicsRequirementsKHR(g_instance, g_systemId, &requirements);
+        if (XR_FAILED(res)) {
+            Log.error("Failed to get Vulkan graphics requirements: {}", (int)res);
+            return false;
+        }
+    } else {
+        Log.error("Failed to load xrGetVulkanGraphicsRequirementsKHR function pointer");
+        return false;
+    }
+
     XrGraphicsBindingVulkanKHR binding{XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR};
     binding.instance = instance;
     binding.physicalDevice = physicalDevice;
@@ -129,3 +179,74 @@ bool initialize_session(VkInstance instance, VkPhysicalDevice physicalDevice, Vk
 }
 
 } // namespace aurora::xr
+
+extern "C" VkResult vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkInstance* pInstance) {
+    typedef VkResult (*PFN_vkCreateInstance)(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance*);
+    static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
+    if (!real_vkCreateInstance) {
+        real_vkCreateInstance = (PFN_vkCreateInstance)dlsym(RTLD_NEXT, "vkCreateInstance");
+    }
+
+    VkInstanceCreateInfo createInfo = *pCreateInfo;
+    std::vector<const char*> extensions;
+    if (pCreateInfo->ppEnabledExtensionNames) {
+        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+            extensions.push_back(pCreateInfo->ppEnabledExtensionNames[i]);
+        }
+    }
+
+    auto add_ext_if_missing = [&](const char* name) {
+        for (const auto& ext : extensions) {
+            if (std::strcmp(ext, name) == 0) return;
+        }
+        extensions.push_back(name);
+    };
+
+    add_ext_if_missing("VK_KHR_get_physical_device_properties2");
+    add_ext_if_missing("VK_KHR_external_memory_capabilities");
+    add_ext_if_missing("VK_KHR_external_semaphore_capabilities");
+
+    createInfo.enabledExtensionCount = extensions.size();
+    createInfo.ppEnabledExtensionNames = extensions.data();
+
+    return real_vkCreateInstance(&createInfo, pAllocator, pInstance);
+}
+
+extern "C" VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDevice* pDevice) {
+    typedef VkResult (*PFN_vkCreateDevice)(VkPhysicalDevice, const VkDeviceCreateInfo*, const VkAllocationCallbacks*, VkDevice*);
+    static PFN_vkCreateDevice real_vkCreateDevice = nullptr;
+    if (!real_vkCreateDevice) {
+        real_vkCreateDevice = (PFN_vkCreateDevice)dlsym(RTLD_NEXT, "vkCreateDevice");
+    }
+
+    VkDeviceCreateInfo createInfo = *pCreateInfo;
+    std::vector<const char*> extensions;
+    if (pCreateInfo->ppEnabledExtensionNames) {
+        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+            extensions.push_back(pCreateInfo->ppEnabledExtensionNames[i]);
+        }
+    }
+
+    auto add_ext_if_missing = [&](const char* name) {
+        for (const auto& ext : extensions) {
+            if (std::strcmp(ext, name) == 0) return;
+        }
+        extensions.push_back(name);
+    };
+
+    add_ext_if_missing("VK_KHR_external_memory");
+    add_ext_if_missing("VK_KHR_external_memory_fd");
+    add_ext_if_missing("VK_KHR_external_semaphore");
+    add_ext_if_missing("VK_KHR_external_semaphore_fd");
+    add_ext_if_missing("VK_KHR_get_memory_requirements2");
+    add_ext_if_missing("VK_KHR_dedicated_allocation");
+    add_ext_if_missing("VK_KHR_bind_memory2");
+    add_ext_if_missing("VK_KHR_image_format_list");
+    add_ext_if_missing("VK_KHR_sampler_ycbcr_conversion");
+    add_ext_if_missing("VK_KHR_timeline_semaphore");
+
+    createInfo.enabledExtensionCount = extensions.size();
+    createInfo.ppEnabledExtensionNames = extensions.data();
+
+    return real_vkCreateDevice(physicalDevice, &createInfo, pAllocator, pDevice);
+}

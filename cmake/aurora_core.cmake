@@ -76,3 +76,8 @@ if (AURORA_ENABLE_GX)
         target_compile_definitions(aurora_core PRIVATE DAWN_ENABLE_BACKEND_NULL)
     endif ()
 endif ()
+
+
+target_link_libraries(aurora_core PRIVATE openxr_loader)
+find_package(Vulkan REQUIRED)
+target_link_libraries(aurora_core PRIVATE Vulkan::Vulkan)
