@@ -1,5 +1,7 @@
 include(FetchContent)
 
+set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+
 # Don't build tests for third party dependencies
 set(BUILD_TESTING OFF CACHE INTERNAL "Build tests")
 set(SKIP_INSTALL_ALL ON)
