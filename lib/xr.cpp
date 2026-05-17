@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <dlfcn.h>
 #include "xr.hpp"
 #include "logging.hpp"
@@ -9,6 +8,11 @@
 #include <cmath>
 #include <iostream>
 #include <dawn/native/VulkanBackend.h>
+#ifdef __ANDROID__
+#include <SDL3/SDL_system.h>
+#include <android/hardware_buffer.h>
+#include <vulkan/vulkan_android.h>
+#endif
 
 namespace aurora::xr {
 static Module Log("aurora::xr");
@@ -43,8 +47,48 @@ static bool g_eyeViewsValid = false;
 static VkImage g_sharedVkImage = VK_NULL_HANDLE;
 static VkDeviceMemory g_sharedVkMemory = VK_NULL_HANDLE;
 static wgpu::Texture g_dawnRenderTexture = nullptr;
+#ifdef __ANDROID__
+static AHardwareBuffer* g_hardwareBuffer = nullptr;
+#endif
 
 bool initialize_instance() {
+#ifdef __ANDROID__
+    // Initialize the OpenXR loader on Android - must be done before any other xr* calls.
+    PFN_xrInitializeLoaderKHR xrInitializeLoaderKHR = nullptr;
+    xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR",
+                          (PFN_xrVoidFunction*)&xrInitializeLoaderKHR);
+    if (xrInitializeLoaderKHR) {
+        JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        if (env == nullptr) {
+            Log.error("Failed to get Android JNI Env!");
+            return false;
+        }
+        JavaVM* vm = nullptr;
+        env->GetJavaVM(&vm);
+        if (vm == nullptr) {
+            Log.error("Failed to get Android JavaVM!");
+            return false;
+        }
+        jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (activity == nullptr) {
+            Log.error("Failed to get Android Activity context!");
+            return false;
+        }
+        XrLoaderInitInfoAndroidKHR loaderInfo{XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR};
+        loaderInfo.applicationVM = vm;
+        loaderInfo.applicationContext = activity;
+        XrResult res = xrInitializeLoaderKHR((const XrLoaderInitInfoBaseHeaderKHR*)&loaderInfo);
+        if (XR_FAILED(res)) {
+            Log.error("Failed to initialize OpenXR Loader: {}", (int)res);
+            return false;
+        }
+        Log.info("OpenXR Loader initialized successfully on Android");
+    } else {
+        Log.error("xrInitializeLoaderKHR function not found!");
+        return false;
+    }
+#endif
+
     uint32_t extCount = 0;
     xrEnumerateInstanceExtensionProperties(nullptr, 0, &extCount, nullptr);
     std::vector<XrExtensionProperties> extProps(extCount, {XR_TYPE_EXTENSION_PROPERTIES});
@@ -295,6 +339,118 @@ static void create_dawn_textures() {
         wgpuFmt = wgpu::TextureFormat::RGBA8Unorm;
     }
 
+    wgpu::TextureDescriptor td{};
+    td.size = {g_swapchainWidth, g_swapchainHeight, 1};
+    td.format = wgpuFmt;
+    td.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+
+    WGPUTexture wgpuTex = nullptr;
+
+#ifdef __ANDROID__
+    // --- Android path: use AHardwareBuffer for Dawn image sharing ---
+    // Convert VkFormat to AHardwareBuffer_Format
+    // AHardwareBuffer only supports RGBA formats natively; BGRA is not available.
+    // Use RGBA for all cases - the swapchain format selection will pick RGBA on Android.
+    uint32_t ahbFormat = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+
+    // 1. Allocate AHardwareBuffer
+    AHardwareBuffer_Desc ahbDesc{};
+    ahbDesc.width = g_swapchainWidth;
+    ahbDesc.height = g_swapchainHeight;
+    ahbDesc.layers = 1;
+    ahbDesc.format = ahbFormat;
+    ahbDesc.usage = AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER |
+                    AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+    if (AHardwareBuffer_allocate(&ahbDesc, &g_hardwareBuffer) != 0) {
+        Log.error("Failed to allocate AHardwareBuffer");
+        return;
+    }
+
+    // 2. Query Vulkan properties for the AHardwareBuffer
+    auto pfnGetAHBProperties = (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)
+        vkGetDeviceProcAddr(g_vkDevice, "vkGetAndroidHardwareBufferPropertiesANDROID");
+    if (!pfnGetAHBProperties) {
+        Log.error("vkGetAndroidHardwareBufferPropertiesANDROID not found");
+        AHardwareBuffer_release(g_hardwareBuffer);
+        g_hardwareBuffer = nullptr;
+        return;
+    }
+    VkAndroidHardwareBufferPropertiesANDROID ahbProps{
+        VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID};
+    if (pfnGetAHBProperties(g_vkDevice, g_hardwareBuffer, &ahbProps) != VK_SUCCESS) {
+        Log.error("vkGetAndroidHardwareBufferPropertiesANDROID failed");
+        AHardwareBuffer_release(g_hardwareBuffer);
+        g_hardwareBuffer = nullptr;
+        return;
+    }
+
+    // 3. Create VkImage backed by the AHardwareBuffer
+    VkExternalMemoryImageCreateInfo extImageCI{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+    extImageCI.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+
+    VkImageCreateInfo imageCI{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    imageCI.pNext = &extImageCI;
+    imageCI.imageType = VK_IMAGE_TYPE_2D;
+    imageCI.format = vkFmt;
+    imageCI.extent = {g_swapchainWidth, g_swapchainHeight, 1};
+    imageCI.mipLevels = 1;
+    imageCI.arrayLayers = 1;
+    imageCI.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCI.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCI.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(g_vkDevice, &imageCI, nullptr, &g_sharedVkImage) != VK_SUCCESS) {
+        Log.error("Failed to create AHardwareBuffer-backed VkImage");
+        AHardwareBuffer_release(g_hardwareBuffer);
+        g_hardwareBuffer = nullptr;
+        return;
+    }
+
+    // 4. Import AHardwareBuffer as VkDeviceMemory
+    VkImportAndroidHardwareBufferInfoANDROID importInfo{
+        VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID};
+    importInfo.buffer = g_hardwareBuffer;
+
+    VkMemoryDedicatedAllocateInfo dedicatedAllocInfo{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+    dedicatedAllocInfo.pNext = &importInfo;
+    dedicatedAllocInfo.image = g_sharedVkImage;
+
+    uint32_t memTypeIndex = 0;
+    uint32_t memTypeBits = ahbProps.memoryTypeBits;
+    for (uint32_t i = 0; i < 32; ++i) {
+        if (memTypeBits & (1u << i)) { memTypeIndex = i; break; }
+    }
+
+    VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocInfo.pNext = &dedicatedAllocInfo;
+    allocInfo.allocationSize = ahbProps.allocationSize;
+    allocInfo.memoryTypeIndex = memTypeIndex;
+    if (vkAllocateMemory(g_vkDevice, &allocInfo, nullptr, &g_sharedVkMemory) != VK_SUCCESS) {
+        Log.error("Failed to allocate VkDeviceMemory from AHardwareBuffer");
+        vkDestroyImage(g_vkDevice, g_sharedVkImage, nullptr);
+        g_sharedVkImage = VK_NULL_HANDLE;
+        AHardwareBuffer_release(g_hardwareBuffer);
+        g_hardwareBuffer = nullptr;
+        return;
+    }
+    vkBindImageMemory(g_vkDevice, g_sharedVkImage, g_sharedVkMemory, 0);
+
+    // 5. Wrap the AHardwareBuffer in Dawn
+    dawn::native::vulkan::ExternalImageDescriptorAHardwareBuffer desc;
+    desc.cTextureDescriptor = reinterpret_cast<const WGPUTextureDescriptor*>(&td);
+    desc.isInitialized = false;
+    // Dawn forward-declares 'struct AHardwareBuffer' inside its own namespace, making
+    // desc.handle a 'dawn::native::vulkan::AHardwareBuffer*' that is incompatible with
+    // our '::AHardwareBuffer*' at the type system level even though they are the same.
+    // Use memcpy to assign the pointer safely without a type-system cast.
+    { void* _ahb_ptr = g_hardwareBuffer; std::memcpy(&desc.handle, &_ahb_ptr, sizeof(void*)); }
+    desc.releasedOldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    desc.releasedNewLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    wgpuTex = dawn::native::vulkan::WrapVulkanImage(webgpu::g_device.Get(), &desc);
+
+#else // Linux / Desktop: OpaqueFD path
     // 1. Create external VkImage
     VkFormat viewFormats[] = { vkFmt };
     VkImageFormatListCreateInfo formatListCI{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
@@ -351,27 +507,19 @@ static void create_dawn_textures() {
     }
     vkBindImageMemory(g_vkDevice, g_sharedVkImage, g_sharedVkMemory, 0);
 
-    // Get memory FD using vkGetMemoryFdKHR
-    VkMemoryGetFdInfoKHR getFdInfo{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
-    getFdInfo.memory = g_sharedVkMemory;
-    getFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-
     PFN_vkGetMemoryFdKHR pfnGetMemoryFdKHR = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(g_vkDevice, "vkGetMemoryFdKHR");
     if (!pfnGetMemoryFdKHR) {
         Log.error("vkGetMemoryFdKHR function pointer not found!");
         return;
     }
+    VkMemoryGetFdInfoKHR getFdInfo{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
+    getFdInfo.memory = g_sharedVkMemory;
+    getFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
     int memoryFD = -1;
     if (pfnGetMemoryFdKHR(g_vkDevice, &getFdInfo, &memoryFD) != VK_SUCCESS) {
         Log.error("Failed to get Vulkan memory FD");
         return;
     }
-
-    // Wrap the Vulkan image in Dawn
-    wgpu::TextureDescriptor td{};
-    td.size = {g_swapchainWidth, g_swapchainHeight, 1};
-    td.format = wgpuFmt;
-    td.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
 
     dawn::native::vulkan::ExternalImageDescriptorOpaqueFD desc;
     desc.cTextureDescriptor = reinterpret_cast<const WGPUTextureDescriptor*>(&td);
@@ -382,7 +530,9 @@ static void create_dawn_textures() {
     desc.releasedOldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     desc.releasedNewLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    WGPUTexture wgpuTex = dawn::native::vulkan::WrapVulkanImage(webgpu::g_device.Get(), &desc);
+    wgpuTex = dawn::native::vulkan::WrapVulkanImage(webgpu::g_device.Get(), &desc);
+#endif // __ANDROID__
+
     if (!wgpuTex) {
         Log.error("Failed to wrap Vulkan image in Dawn");
         return;

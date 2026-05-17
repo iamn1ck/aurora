@@ -102,6 +102,8 @@ if (_aurora_dawn_provider STREQUAL "vendor")
       URL "https://github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz"
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
+      PATCH_COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/../../../patches/apply-dawn-patch.sh"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/../../../patches/dawn-android-xr-extensions.patch"
     )
     FetchContent_MakeAvailable(dawn)
     if (NOT TARGET webgpu_dawn)

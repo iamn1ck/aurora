@@ -7,6 +7,10 @@
 
 #define XR_USE_GRAPHICS_API_VULKAN
 #include <vulkan/vulkan.h>
+#ifdef __ANDROID__
+#define XR_USE_PLATFORM_ANDROID
+#include <jni.h>
+#endif
 #include <openxr/openxr_platform.h>
 #include <webgpu/webgpu_cpp.h>
 
