@@ -49,6 +49,8 @@ extern TextureWithSampler g_frameBufferResolved;
 extern TextureWithSampler g_depthBuffer;
 extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
+extern wgpu::Buffer g_xrEyeUniformBuffers[2];
+extern wgpu::BindGroup g_xrEyeBindGroups[2];
 extern wgpu::Instance g_instance;
 
 bool initialize(AuroraBackend backend);
@@ -60,6 +62,7 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);
 const TextureWithSampler& present_source() noexcept;
 wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source);
+void prepare_xr_stereo_uniforms(float leftOffsetX, float rightOffsetX);
 Viewport calculate_present_viewport(uint32_t surface_width, uint32_t surface_height, uint32_t content_width,
                                     uint32_t content_height) noexcept;
 void draw_clear(const wgpu::RenderPassEncoder& pass, bool clearColor, bool clearAlpha, bool clearDepth,
