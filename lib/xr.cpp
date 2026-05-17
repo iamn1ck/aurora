@@ -317,6 +317,39 @@ static uint32_t find_memory_type(uint32_t filter, VkMemoryPropertyFlags props) {
     }
     throw std::runtime_error("No suitable memory type");
 }
+#if defined(_WIN32)
+#include <windows.h>
+
+// Structs and signatures from Vulkan Win32 extensions to avoid compile errors
+// regardless of header inclusion order.
+constexpr VkStructureType VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR = static_cast<VkStructureType>(1000073000);
+constexpr VkStructureType VK_STRUCTURE_TYPE_EXPORT_MEMORY_WIN32_HANDLE_INFO_KHR = static_cast<VkStructureType>(1000073001);
+constexpr VkStructureType VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR = static_cast<VkStructureType>(1000073002);
+constexpr VkStructureType VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR = static_cast<VkStructureType>(1000073003);
+
+constexpr VkExternalMemoryHandleTypeFlagBits VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT = static_cast<VkExternalMemoryHandleTypeFlagBits>(0x00000002);
+
+struct VkMemoryGetWin32HandleInfoKHR {
+    VkStructureType                       sType;
+    const void*                           pNext;
+    VkDeviceMemory                        memory;
+    VkExternalMemoryHandleTypeFlagBits    handleType;
+};
+
+typedef VkResult (VKAPI_PTR *PFN_vkGetMemoryWin32HandleKHR)(
+    VkDevice                                    device,
+    const VkMemoryGetWin32HandleInfoKHR*        pGetWin32HandleInfo,
+    HANDLE*                                     pHandle);
+
+struct ExternalImageDescriptorOpaqueWin32 : public dawn::native::vulkan::ExternalImageDescriptorVk {
+    ExternalImageDescriptorOpaqueWin32()
+        : dawn::native::vulkan::ExternalImageDescriptorVk(
+              static_cast<dawn::native::ExternalImageType>(6)) {} // Extended type for OpaqueWin32
+    HANDLE sharedHandle = nullptr;
+    VkDeviceSize allocationSize = 0;
+    uint32_t memoryTypeIndex = 0;
+};
+#endif
 
 static void create_dawn_textures() {
     if (!webgpu::g_device) return;
@@ -450,9 +483,86 @@ static void create_dawn_textures() {
     wgpuTex = dawn::native::vulkan::WrapVulkanImage(webgpu::g_device.Get(), &desc);
 
 #elif defined(_WIN32)
-    // --- Windows path: Vulkan external memory wrapping is not supported in Dawn ---
-    Log.error("Vulkan external image sharing is not supported on Windows");
-    return;
+    // 1. Create external VkImage
+    VkFormat viewFormats[] = { vkFmt };
+    VkImageFormatListCreateInfo formatListCI{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+    formatListCI.viewFormatCount = 1;
+    formatListCI.pViewFormats = viewFormats;
+
+    VkExternalMemoryImageCreateInfo extImageCI{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+    extImageCI.pNext = &formatListCI;
+    extImageCI.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+    VkImageCreateInfo imageCI{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    imageCI.flags = VK_IMAGE_CREATE_ALIAS_BIT;
+    imageCI.pNext = &extImageCI;
+    imageCI.imageType = VK_IMAGE_TYPE_2D;
+    imageCI.format = vkFmt;
+    imageCI.extent = { g_swapchainWidth, g_swapchainHeight, 1 };
+    imageCI.mipLevels = 1;
+    imageCI.arrayLayers = 1;
+    imageCI.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCI.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCI.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vkCreateImage(g_vkDevice, &imageCI, nullptr, &g_sharedVkImage) != VK_SUCCESS) {
+        Log.error("Failed to create shared VkImage on Windows");
+        return;
+    }
+
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(g_vkDevice, g_sharedVkImage, &memReqs);
+
+    VkMemoryDedicatedAllocateInfo dedicatedAllocInfo{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+    dedicatedAllocInfo.image = g_sharedVkImage;
+    dedicatedAllocInfo.buffer = VK_NULL_HANDLE;
+
+    VkExportMemoryAllocateInfo exportAllocInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+    exportAllocInfo.pNext = &dedicatedAllocInfo;
+    exportAllocInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+    VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocInfo.pNext = &exportAllocInfo;
+    allocInfo.allocationSize = memReqs.size;
+    try {
+        allocInfo.memoryTypeIndex = find_memory_type(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    } catch (const std::exception& e) {
+        Log.error("Shared memory type check failed on Windows: {}", e.what());
+        return;
+    }
+
+    if (vkAllocateMemory(g_vkDevice, &allocInfo, nullptr, &g_sharedVkMemory) != VK_SUCCESS) {
+        Log.error("Failed to allocate shared VkDeviceMemory on Windows");
+        return;
+    }
+    vkBindImageMemory(g_vkDevice, g_sharedVkImage, g_sharedVkMemory, 0);
+
+    PFN_vkGetMemoryWin32HandleKHR pfnGetMemoryWin32HandleKHR = (PFN_vkGetMemoryWin32HandleKHR)vkGetDeviceProcAddr(g_vkDevice, "vkGetMemoryWin32HandleKHR");
+    if (!pfnGetMemoryWin32HandleKHR) {
+        Log.error("vkGetMemoryWin32HandleKHR function pointer not found!");
+        return;
+    }
+    VkMemoryGetWin32HandleInfoKHR getHandleInfo{VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
+    getHandleInfo.memory = g_sharedVkMemory;
+    getHandleInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    HANDLE sharedHandle = nullptr;
+    if (pfnGetMemoryWin32HandleKHR(g_vkDevice, &getHandleInfo, &sharedHandle) != VK_SUCCESS) {
+        Log.error("Failed to get Vulkan memory Win32 HANDLE");
+        return;
+    }
+
+    ExternalImageDescriptorOpaqueWin32 desc;
+    desc.cTextureDescriptor = reinterpret_cast<const WGPUTextureDescriptor*>(&td);
+    desc.isInitialized = false;
+    desc.sharedHandle = sharedHandle;
+    desc.allocationSize = memReqs.size;
+    desc.memoryTypeIndex = allocInfo.memoryTypeIndex;
+    desc.releasedOldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    desc.releasedNewLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    wgpuTex = dawn::native::vulkan::WrapVulkanImage(webgpu::g_device.Get(), &desc);
 #else // Linux / Desktop: OpaqueFD path
     // 1. Create external VkImage
     VkFormat viewFormats[] = { vkFmt };
