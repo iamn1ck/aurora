@@ -28,6 +28,7 @@ static VkCommandPool g_vkCommandPool = VK_NULL_HANDLE;
 static VkCommandBuffer g_vkCommandBuffer = VK_NULL_HANDLE;
 
 static std::vector<XrSwapchainImageVulkanKHR> g_swapchainImages;
+static int64_t g_swapchainFormat = 0;
 static uint32_t g_swapchainWidth = 0;
 static uint32_t g_swapchainHeight = 0;
 static uint32_t g_eyeWidth = 0;
@@ -277,14 +278,38 @@ static uint32_t find_memory_type(uint32_t filter, VkMemoryPropertyFlags props) {
 static void create_dawn_textures() {
     if (!webgpu::g_device) return;
 
+    VkFormat vkFmt = VK_FORMAT_R8G8B8A8_UNORM;
+    wgpu::TextureFormat wgpuFmt = wgpu::TextureFormat::RGBA8Unorm;
+
+    if (g_swapchainFormat == VK_FORMAT_B8G8R8A8_UNORM) {
+        vkFmt = VK_FORMAT_B8G8R8A8_UNORM;
+        wgpuFmt = wgpu::TextureFormat::BGRA8Unorm;
+    } else if (g_swapchainFormat == VK_FORMAT_B8G8R8A8_SRGB) {
+        vkFmt = VK_FORMAT_B8G8R8A8_SRGB;
+        wgpuFmt = wgpu::TextureFormat::BGRA8UnormSrgb;
+    } else if (g_swapchainFormat == VK_FORMAT_R8G8B8A8_SRGB) {
+        vkFmt = VK_FORMAT_R8G8B8A8_SRGB;
+        wgpuFmt = wgpu::TextureFormat::RGBA8UnormSrgb;
+    } else if (g_swapchainFormat == VK_FORMAT_R8G8B8A8_UNORM) {
+        vkFmt = VK_FORMAT_R8G8B8A8_UNORM;
+        wgpuFmt = wgpu::TextureFormat::RGBA8Unorm;
+    }
+
     // 1. Create external VkImage
+    VkFormat viewFormats[] = { vkFmt };
+    VkImageFormatListCreateInfo formatListCI{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+    formatListCI.viewFormatCount = 1;
+    formatListCI.pViewFormats = viewFormats;
+
     VkExternalMemoryImageCreateInfo extImageCI{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+    extImageCI.pNext = &formatListCI;
     extImageCI.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
     VkImageCreateInfo imageCI{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    imageCI.flags = VK_IMAGE_CREATE_ALIAS_BIT;
     imageCI.pNext = &extImageCI;
     imageCI.imageType = VK_IMAGE_TYPE_2D;
-    imageCI.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageCI.format = vkFmt;
     imageCI.extent = { g_swapchainWidth, g_swapchainHeight, 1 };
     imageCI.mipLevels = 1;
     imageCI.arrayLayers = 1;
@@ -302,7 +327,12 @@ static void create_dawn_textures() {
     VkMemoryRequirements memReqs;
     vkGetImageMemoryRequirements(g_vkDevice, g_sharedVkImage, &memReqs);
 
+    VkMemoryDedicatedAllocateInfo dedicatedAllocInfo{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+    dedicatedAllocInfo.image = g_sharedVkImage;
+    dedicatedAllocInfo.buffer = VK_NULL_HANDLE;
+
     VkExportMemoryAllocateInfo exportAllocInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+    exportAllocInfo.pNext = &dedicatedAllocInfo;
     exportAllocInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
     VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -340,7 +370,7 @@ static void create_dawn_textures() {
     // Wrap the Vulkan image in Dawn
     wgpu::TextureDescriptor td{};
     td.size = {g_swapchainWidth, g_swapchainHeight, 1};
-    td.format = wgpu::TextureFormat::RGBA8Unorm;
+    td.format = wgpuFmt;
     td.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
 
     dawn::native::vulkan::ExternalImageDescriptorOpaqueFD desc;
@@ -435,16 +465,17 @@ bool initialize_session(VkInstance instance, VkPhysicalDevice physicalDevice, Vk
 
     int64_t selectedFmt = fmts[0];
     for (int64_t f : fmts) {
-        if (f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_SRGB) {
+        if (f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_B8G8R8A8_UNORM) {
             selectedFmt = f;
             break;
         }
     }
+    g_swapchainFormat = selectedFmt;
 
     XrSwapchainCreateInfo scCI{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     scCI.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     scCI.format = selectedFmt;
-    scCI.sampleCount = views[0].recommendedSwapchainSampleCount;
+    scCI.sampleCount = 1;
     scCI.width = g_swapchainWidth;
     scCI.height = g_swapchainHeight;
     scCI.faceCount = 1;
@@ -514,6 +545,10 @@ bool begin_frame() {
 
 void end_frame() {
     if (!g_sessionRunning || !g_dawnRenderTexture) return;
+
+    if (g_vkDevice != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(g_vkDevice);
+    }
 
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
