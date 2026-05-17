@@ -1,4 +1,3 @@
-#include <dlfcn.h>
 #include "xr.hpp"
 #include "logging.hpp"
 #include "webgpu/gpu.hpp"
