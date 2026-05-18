@@ -302,6 +302,12 @@ if (NOT TARGET openxr_loader)
   set(OPENXR_INSTALL OFF CACHE BOOL "" FORCE)
   set(BUILD_WITH_SYSTEM_JSONCPP OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(openxr)
+
+  if (TARGET openxr_loader)
+    # OpenXR forces MSVC_RUNTIME_LIBRARY to DLL for static builds, violating CMP0091.
+    # We clear the property so it falls back to inheriting the global CMAKE_MSVC_RUNTIME_LIBRARY setting.
+    set_property(TARGET openxr_loader PROPERTY MSVC_RUNTIME_LIBRARY "")
+  endif ()
 else ()
   message(STATUS "aurora: Using existing OpenXR-SDK")
 endif ()
