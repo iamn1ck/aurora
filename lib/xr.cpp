@@ -41,6 +41,7 @@ static XrQuaternionf g_headOrientation{0.f, 0.f, 0.f, 1.f};
 static bool g_headPoseValid = false;
 static XrView g_eyeViews[2] = { {XR_TYPE_VIEW}, {XR_TYPE_VIEW} };
 static bool g_eyeViewsValid = false;
+static bool g_useVulkanEnable2 = false;
 
 // Persistent zero-copy Vulkan-WebGPU texture interop resources
 static VkImage g_sharedVkImage = VK_NULL_HANDLE;
@@ -104,12 +105,14 @@ bool initialize_instance() {
     bool hasVulkanEnable2 = has_ext(XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
     bool hasVulkanEnable = has_ext(XR_KHR_VULKAN_ENABLE_EXTENSION_NAME);
 
-    if (hasVulkanEnable) {
-        extensions.push_back(XR_KHR_VULKAN_ENABLE_EXTENSION_NAME);
-        Log.info("Using OpenXR Vulkan Enable (Legacy) extension");
-    } else if (hasVulkanEnable2) {
+    if (hasVulkanEnable2) {
         extensions.push_back(XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
+        g_useVulkanEnable2 = true;
         Log.info("Using OpenXR Vulkan Enable 2 extension");
+    } else if (hasVulkanEnable) {
+        extensions.push_back(XR_KHR_VULKAN_ENABLE_EXTENSION_NAME);
+        g_useVulkanEnable2 = false;
+        Log.info("Using OpenXR Vulkan Enable (Legacy) extension");
     } else {
         Log.error("Neither Vulkan Enable nor Vulkan Enable 2 extensions are supported by OpenXR!");
         return false;
@@ -258,13 +261,29 @@ std::vector<std::string> get_vulkan_device_extensions() {
 VkPhysicalDevice get_vulkan_graphics_device(VkInstance instance) {
     if (g_instance == XR_NULL_HANDLE) return VK_NULL_HANDLE;
     
-    // Call graphics requirements first as required by OpenXR spec!
-    // Try Vulkan Enable 2 requirements first
-    PFN_xrGetVulkanGraphicsRequirements2KHR xrGetVulkanGraphicsRequirements2KHR = nullptr;
-    xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsRequirements2KHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsRequirements2KHR);
-    if (xrGetVulkanGraphicsRequirements2KHR) {
-        XrGraphicsRequirementsVulkanKHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};
-        xrGetVulkanGraphicsRequirements2KHR(g_instance, g_systemId, &requirements);
+    if (g_useVulkanEnable2) {
+        PFN_xrGetVulkanGraphicsRequirements2KHR xrGetVulkanGraphicsRequirements2KHR = nullptr;
+        xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsRequirements2KHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsRequirements2KHR);
+        if (xrGetVulkanGraphicsRequirements2KHR) {
+            XrGraphicsRequirementsVulkanKHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};
+            xrGetVulkanGraphicsRequirements2KHR(g_instance, g_systemId, &requirements);
+        }
+
+        PFN_xrGetVulkanGraphicsDevice2KHR xrGetVulkanGraphicsDevice2KHR = nullptr;
+        xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsDevice2KHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsDevice2KHR);
+        if (xrGetVulkanGraphicsDevice2KHR) {
+            XrVulkanGraphicsDeviceGetInfoKHR getInfo{XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR};
+            getInfo.systemId = g_systemId;
+            getInfo.vulkanInstance = instance;
+            
+            VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+            XrResult res = xrGetVulkanGraphicsDevice2KHR(g_instance, &getInfo, &physicalDevice);
+            if (XR_SUCCEEDED(res) && physicalDevice != VK_NULL_HANDLE) {
+                return physicalDevice;
+            } else {
+                Log.warn("xrGetVulkanGraphicsDevice2KHR returned error: {} or physicalDevice is null", (int)res);
+            }
+        }
     } else {
         PFN_xrGetVulkanGraphicsRequirementsKHR xrGetVulkanGraphicsRequirementsKHR = nullptr;
         xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsRequirementsKHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsRequirementsKHR);
@@ -272,35 +291,17 @@ VkPhysicalDevice get_vulkan_graphics_device(VkInstance instance) {
             XrGraphicsRequirementsVulkanKHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};
             xrGetVulkanGraphicsRequirementsKHR(g_instance, g_systemId, &requirements);
         }
-    }
 
-    // Try Vulkan Enable 2 first
-    PFN_xrGetVulkanGraphicsDevice2KHR xrGetVulkanGraphicsDevice2KHR = nullptr;
-    xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsDevice2KHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsDevice2KHR);
-    if (xrGetVulkanGraphicsDevice2KHR) {
-        XrVulkanGraphicsDeviceGetInfoKHR getInfo{XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR};
-        getInfo.systemId = g_systemId;
-        getInfo.vulkanInstance = instance;
-        
-        VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-        XrResult res = xrGetVulkanGraphicsDevice2KHR(g_instance, &getInfo, &physicalDevice);
-        if (XR_SUCCEEDED(res) && physicalDevice != VK_NULL_HANDLE) {
-            return physicalDevice;
-        } else {
-            Log.warn("xrGetVulkanGraphicsDevice2KHR returned error: {} or physicalDevice is null", (int)res);
-        }
-    }
-
-    // Fallback to legacy KHR
-    PFN_xrGetVulkanGraphicsDeviceKHR xrGetVulkanGraphicsDeviceKHR = nullptr;
-    xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsDeviceKHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsDeviceKHR);
-    if (xrGetVulkanGraphicsDeviceKHR) {
-        VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-        XrResult res = xrGetVulkanGraphicsDeviceKHR(g_instance, g_systemId, instance, &physicalDevice);
-        if (XR_SUCCEEDED(res) && physicalDevice != VK_NULL_HANDLE) {
-            return physicalDevice;
-        } else {
-            Log.warn("xrGetVulkanGraphicsDeviceKHR returned error: {} or physicalDevice is null", (int)res);
+        PFN_xrGetVulkanGraphicsDeviceKHR xrGetVulkanGraphicsDeviceKHR = nullptr;
+        xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsDeviceKHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsDeviceKHR);
+        if (xrGetVulkanGraphicsDeviceKHR) {
+            VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+            XrResult res = xrGetVulkanGraphicsDeviceKHR(g_instance, g_systemId, instance, &physicalDevice);
+            if (XR_SUCCEEDED(res) && physicalDevice != VK_NULL_HANDLE) {
+                return physicalDevice;
+            } else {
+                Log.warn("xrGetVulkanGraphicsDeviceKHR returned error: {} or physicalDevice is null", (int)res);
+            }
         }
     }
     
@@ -661,13 +662,18 @@ bool initialize_session(VkInstance instance, VkPhysicalDevice physicalDevice, Vk
     g_vkQueueFamilyIndex = queueFamilyIndex;
     vkGetDeviceQueue(device, queueFamilyIndex, queueIndex, &g_vkQueue);
 
-    PFN_xrGetVulkanGraphicsRequirements2KHR xrGetVulkanGraphicsRequirements2KHR = nullptr;
-    xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsRequirements2KHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsRequirements2KHR);
-    if (xrGetVulkanGraphicsRequirements2KHR) {
-        XrGraphicsRequirementsVulkanKHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};
-        XrResult res = xrGetVulkanGraphicsRequirements2KHR(g_instance, g_systemId, &requirements);
-        if (XR_FAILED(res)) {
-            Log.error("Failed to get Vulkan 2 graphics requirements: {}", (int)res);
+    if (g_useVulkanEnable2) {
+        PFN_xrGetVulkanGraphicsRequirements2KHR xrGetVulkanGraphicsRequirements2KHR = nullptr;
+        xrGetInstanceProcAddr(g_instance, "xrGetVulkanGraphicsRequirements2KHR", (PFN_xrVoidFunction*)&xrGetVulkanGraphicsRequirements2KHR);
+        if (xrGetVulkanGraphicsRequirements2KHR) {
+            XrGraphicsRequirementsVulkanKHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};
+            XrResult res = xrGetVulkanGraphicsRequirements2KHR(g_instance, g_systemId, &requirements);
+            if (XR_FAILED(res)) {
+                Log.error("Failed to get Vulkan 2 graphics requirements: {}", (int)res);
+                return false;
+            }
+        } else {
+            Log.error("Failed to load xrGetVulkanGraphicsRequirements2KHR function pointer");
             return false;
         }
     } else {
@@ -681,7 +687,7 @@ bool initialize_session(VkInstance instance, VkPhysicalDevice physicalDevice, Vk
                 return false;
             }
         } else {
-            Log.error("Failed to load any xrGetVulkanGraphicsRequirements function pointer");
+            Log.error("Failed to load xrGetVulkanGraphicsRequirementsKHR function pointer");
             return false;
         }
     }
